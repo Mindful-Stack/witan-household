@@ -1,0 +1,11 @@
+{
+  "name": "my-workspace",
+  "knowledge_base": "lore",
+  "repos": [
+    {
+      "name": "lore",
+      "tags": ["docs"],
+      "description": "The household's knowledge base — read by the Lorekeeper plugin via sibling-fallback."
+    }
+  ]
+}
