@@ -1,5 +1,6 @@
 {
   "name": "my-workspace",
+  "url": "git@github.com:your-org/my-workspace.git",
   "knowledge_base": "lore",
   "repos": [
     {
