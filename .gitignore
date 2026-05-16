@@ -10,6 +10,8 @@
 !/.devcontainer/
 !/.gitignore
 !/CLAUDE.md
+!/Makefile
 !/README.md
 !/lore/
 !/household.json
+!/scripts/
