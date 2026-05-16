@@ -5,7 +5,10 @@
     "ghcr.io/devcontainers/features/node:1": {}
   },
   "postCreateCommand": [
-    "curl -fsSL https://claude.ai/install.sh | bash"
+    "curl -fsSL https://claude.ai/install.sh | bash",
+    // To use a different marketplace, replace 'Mindful-Stack/witan' below.
+    "claude plugin marketplace add Mindful-Stack/witan",
+    "claude plugin install lorekeeper@witan"
   ],
   "remoteEnv": {
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
