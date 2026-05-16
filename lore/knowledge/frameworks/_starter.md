@@ -1,22 +1,32 @@
 ---
-title: Framework-specific patterns
-description: Conventions and patterns tied to specific frameworks (React, .NET, Svelte, etc.) used in this household. Replace with real content as the workspace matures.
-tags: [frameworks]
+title: React component conventions
+description: Naming, file structure, and composition rules for React components in this household.
+tags: [frameworks, react, conventions]
 ---
 
-# Framework-specific patterns
+# React component conventions
 
-One subdirectory per framework, with a node per pattern or area:
+> Replace with your team's actual conventions. This is a starter showing structure and how to cross-reference other nodes.
 
-```
-frameworks/
-├── react/
-│   ├── hooks-conventions.md
-│   └── state-management.md
-├── dotnet/
-│   ├── cqrs-pattern.md
-│   └── ef-core-conventions.md
-└── ...
-```
+## File structure
 
-Replace this placeholder with framework-specific guides as the workspace matures.
+- One component per file.
+- Filename matches the default export: `UserCard.tsx` exports `UserCard`.
+- Co-locate styles: `UserCard.tsx` + `UserCard.module.css` in the same dir.
+
+## Composition
+
+- Functional components only; no class components in new code.
+- Hooks at the top of the function; no conditional hook calls.
+- Extract custom hooks when logic exceeds ~20 lines.
+
+## Naming
+
+- Components: `PascalCase`.
+- Hooks: `useCamelCase`.
+- Boolean props: `isX`, `hasY`, `shouldZ`. Avoid bare `flag` or `enabled`.
+
+## Cross-references
+
+- For PR-review expectations, see [[general/_starter]].
+- For TypeScript-specific style, see [[languages/_starter]].
