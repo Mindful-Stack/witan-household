@@ -18,14 +18,14 @@ split-lore: ## Promote the inline `lore/` to its own sibling repo (interactive; 
 rename:  ## Substitute placeholder workspace name (usage: make rename NAME=foo)
 	@./scripts/rename.sh "$(NAME)"
 
-build-index: ## Rebuild lore/_index.json
-	@node lore/_tools/cli.js build-index
+build-index: ## Rebuild lore/knowledge/_index.json
+	@node lore/_tools/cli.js build-index --dir lore/knowledge
 
 validate: ## Run KB validators (frontmatter, links, orphans)
-	@node lore/_tools/cli.js validate
+	@node lore/_tools/cli.js validate --dir lore/knowledge
 
 doctor:  ## Run full workspace + KB diagnostic
-	@node lore/_tools/cli.js doctor
+	@node lore/_tools/cli.js doctor --dir lore/knowledge
 
 test:    ## Run lore tooling unit tests
 	@node --test lore/_tools/__tests__/*.test.js
