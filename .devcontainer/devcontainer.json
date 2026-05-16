@@ -4,12 +4,10 @@
   "features": {
     "ghcr.io/devcontainers/features/node:1": {}
   },
-  "postCreateCommand": [
-    "curl -fsSL https://claude.ai/install.sh | bash",
-    // To use a different marketplace, replace 'Mindful-Stack/witan' below.
-    "claude plugin marketplace add Mindful-Stack/witan",
-    "claude plugin install lorekeeper@witan"
-  ],
+  // To use a different marketplace, replace 'Mindful-Stack/witan' in postCreateCommand below.
+  // String form (not array) so the shell pipe in the curl invocation is interpreted;
+  // the `&&` chain preserves fail-fast — any step's non-zero exit aborts the rest.
+  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && claude plugin marketplace add Mindful-Stack/witan && claude plugin install lorekeeper@witan",
   "remoteEnv": {
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
   }
