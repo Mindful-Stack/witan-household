@@ -30,6 +30,58 @@ cd my-workspace
 rm -rf .git && git init && git add -A && git commit -m "initial workspace"
 ```
 
+## Adopting witan in an existing project
+
+If you already have a project, you don't need to start fresh. Run `/lore:init` from inside any directory and Lorekeeper detects your state:
+
+### Scenario 1 — greenfield (no project yet)
+
+```sh
+mkdir my-workspace && cd my-workspace
+# In Claude Code:
+/lore:init
+```
+
+Lorekeeper scaffolds the witan-household structure (household.json, .devcontainer/, CLAUDE.md, lore/, .gitignore), substitutes the workspace name, and initialises a git repo.
+
+### Scenario 2 — existing single-repo project, no KB yet
+
+```sh
+cd ~/Source/my-existing-project
+/lore:init
+```
+
+Lorekeeper detects the existing `.git/`, asks before touching anything, then adds the workspace files alongside your existing code. Your `.git/` history, your code, and your remote stay exactly as they were — you just gain `household.json`, `lore/`, and the `.devcontainer/` directory.
+
+### Scenario 3 — existing single-repo with `docs/` or `knowledge/` already
+
+Same as Scenario 2, but `/lore:init` notices the existing docs directory. It offers to rename it to `lore/knowledge/` (recommended) or set up `KNOWLEDGE_BASE_PATH` to point at the existing location.
+
+### Scenario 4 — poly-repo (multiple sibling repos)
+
+```sh
+mkdir ~/Source/my-workspace && mv ~/Source/backend ~/Source/frontend ~/Source/my-workspace/
+cd ~/Source/my-workspace
+/lore:init
+```
+
+Lorekeeper detects the sibling repos, asks which to include, and populates `household.json` accordingly. The workspace meta-repo wraps them; their individual `.git/` histories are unchanged.
+
+### Scenario 5 — poly-repo + existing separate KB
+
+Same as Scenario 4, plus move your existing KB repo into the workspace as `lore/` (or any other name; declare it in `household.json` and set `knowledge_base` to point at it).
+
+## Two-install reality
+
+Lorekeeper is installed in **two distinct contexts**:
+
+1. **On your host** — for direct Claude Code use outside any devcontainer. Install via `/plugin marketplace add Mindful-Stack/witan` + `/plugin install lorekeeper@witan`.
+2. **Inside every Reeve card's container** — automatically, via this template's `.devcontainer/devcontainer.json` `postCreateCommand`.
+
+Same plugin, two install paths, both deliberate. The host install serves general CC work; the container install serves Reeve cards (which run with `--dangerously-skip-permissions`). They don't share state.
+
+If you're not using Reeve, the container install is still useful: any `devcontainer up`-spawned dev shell from this workspace ships with Lorekeeper. If you want to disable it, edit `.devcontainer/devcontainer.json` and remove the last two entries in `postCreateCommand`.
+
 ## Declaring sibling repos
 
 Edit `household.json`:
