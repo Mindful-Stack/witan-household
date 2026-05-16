@@ -1,12 +1,15 @@
 {
-  "name": "my-workspace",
-  "url": "git@github.com:your-org/my-workspace.git",
+  "workspace": "my-workspace",
   "knowledge_base": "lore",
   "repos": [
     {
+      "name": "my-workspace",
+      "url": "git@github.com:your-org/my-workspace.git",
+      "description": "The workspace meta-repo. Contains the inline lore/ KB by default; replace this URL with your own when you publish."
+    },
+    {
       "name": "lore",
-      "tags": ["docs"],
-      "description": "The household's knowledge base — read by the Lorekeeper plugin via sibling-fallback."
+      "description": "Inline knowledge-base directory tracked in this meta-repo. To split into a separate sibling repo, see README.md."
     }
   ]
 }
