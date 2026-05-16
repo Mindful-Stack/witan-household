@@ -36,20 +36,30 @@ Edit `repos.json`:
 
 ```json
 {
-  "name": "my-workspace",
+  "workspace": "my-workspace",
   "knowledge_base": "lore",
   "repos": [
-    { "name": "backend",  "url": "git@github.com:you/backend.git",  "tags": ["backend"] },
-    { "name": "frontend", "url": "git@github.com:you/frontend.git", "tags": ["frontend"] },
-    { "name": "lore",     "tags": ["docs"], "description": "The household's knowledge base." }
+    { "name": "my-workspace", "url": "git@github.com:you/my-workspace.git", "description": "The workspace meta-repo" },
+    { "name": "backend",      "url": "git@github.com:you/backend.git",       "tags": ["backend"] },
+    { "name": "frontend",     "url": "git@github.com:you/frontend.git",      "tags": ["frontend"] },
+    { "name": "lore",         "tags": ["docs"], "description": "The household's knowledge base." }
   ]
 }
 ```
 
-- `name` is the directory the sibling clones into. Must match what's on disk.
-- `url` is **informational** — used by your bootstrap and by `reeve household show`. Reeve does NOT clone siblings from `url` at card-spawn time; it uses the local clone at `<workspace>/<name>/.git` as the `--reference` source.
+- `repos[]` lists every repo in the workspace, **including the workspace meta-repo itself**.
+- `name` is the manifest identifier; for non-workspace entries it's also the directory the sibling clones into.
+- `url` is **informational** — used by your bootstrap and by `reeve household show`. Reeve does NOT clone siblings from `url` at card-spawn time; it uses the local directory at `<workspace>/<name>/` as the `--reference` source.
 - `tags` is free-form categorisation.
-- `knowledge_base` (top-level) is a singular pointer to the entry that holds the KB. If unset, no KB is wired.
+- `workspace` (top-level, required) is a singular pointer to the `repos[]` entry that IS the meta-repo itself.
+- `knowledge_base` (top-level, optional) is a singular pointer to the entry that holds the KB. Can equal `workspace` if the KB is part of the meta-repo with no separate KB entry. If unset, no KB is wired.
+
+**Sibling vs inline (no manifest distinction — just disk state):** Reeve at clone time looks at each non-workspace `repos[]` entry's directory on the host:
+- Has its own `.git/` → it's a separate sibling repo; Reeve clones it for the card via `--reference --dissociate`.
+- Exists without `.git/` → it's an inline directory tracked as part of the meta-repo; arrives with the workspace clone.
+- Doesn't exist → user forgot to bootstrap; hard error.
+
+The starter `repos.json` in this template uses the inline shape for `lore/` — the KB lives inside the meta-repo's git history. To split it into its own repo later, see the "Splitting the lore" section below.
 
 ## Bootstrapping siblings
 
@@ -57,28 +67,41 @@ You own this step — write a `Makefile` target, a `bootstrap.sh`, or run `git c
 
 ```makefile
 setup:
-	@jq -r '.repos[] | select(.url) | "\(.name) \(.url)"' repos.json | while read name url; do \
+	@WORKSPACE=$$(jq -r '.workspace' repos.json); \
+	jq -r --arg ws "$$WORKSPACE" '.repos[] | select(.name != $$ws and .url) | "\(.name) \(.url)"' repos.json | \
+	while read name url; do \
 	  [ -d "$$name" ] || git clone "$$url" "$$name"; \
 	done
 ```
+
+(The filter skips the workspace entry — you're already inside it.)
 
 After bootstrap, each declared sibling is a populated git repo at `<workspace>/<name>/`. Both Reeve and Lorekeeper now have everything they need.
 
 ## The `lore/` knowledge base
 
-`lore/` ships as part of this template — initially tracked in the meta-repo for simplicity. Replace `_starter.md` files with real knowledge as the workspace matures.
+`lore/` ships as part of this template — initially tracked in the meta-repo for simplicity. The `lore` entry in `repos.json` has no `url`, signalling that it's inline. Replace `_starter.md` files with real knowledge as the workspace matures.
+
+### Splitting the lore
 
 If the KB outgrows the single-repo model (becomes too large, needs an independent contribution / review flow, needs to be shared across multiple households), split it:
 
 ```sh
-# In the meta-repo
+# 1. Remove the inline directory from the meta-repo's history.
 git rm -r lore && git commit -m "split lore into its own repo"
-# Add `lore/` to .gitignore (or rely on the existing /* allowlist if you remove the !/lore/ line)
+
+# 2. Stop tracking lore/ in the meta-repo. Edit .gitignore — the
+#    catch-all `/*` already excludes lore/; just remove the `!/lore/`
+#    allowlist line. Commit.
+
+# 3. Clone your separate lore repo as a sibling.
 git clone <your-new-lore-repo> lore
-# Add a `url` field to the `lore` entry in repos.json so future contributors can bootstrap
+
+# 4. Edit repos.json: add a `url` to the `lore` entry so future
+#    contributors' bootstrap can clone it.
 ```
 
-After the split, `lore/` is a sibling repo like any other — the manifest and Lorekeeper integration are unchanged.
+After the split, `lore/` is a sibling repo like any other. The manifest's shape is unchanged — the `lore` entry just acquires a `url`, and Reeve auto-detects the sibling-with-`.git/` shape at clone time.
 
 ## Devcontainer
 
