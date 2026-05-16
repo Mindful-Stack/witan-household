@@ -58,10 +58,10 @@ echo "  OK"
 echo ""
 echo "[2/3] Selecting repos..."
 
-SELECTED=$(node -e "
+SELECTED=$(TAG_FILTER="$TAG_FILTER" REPOS_FILTER="$REPOS_FILTER" node -e "
     const m = require('$MANIFEST');
-    const tag = '$TAG_FILTER';
-    const repos = '$REPOS_FILTER'.split(',').filter(Boolean);
+    const tag = process.env.TAG_FILTER;
+    const repos = process.env.REPOS_FILTER.split(',').filter(Boolean);
     let result = m.repos.filter(r => r.name !== m.workspace && r.url);
     if (tag)          result = result.filter(r => (r.tags || []).includes(tag));
     if (repos.length) result = result.filter(r => repos.includes(r.name));
