@@ -20,7 +20,7 @@ Reeve clones this template to `~/Source/my-workspace/`, sets the manifest's top-
 
 ### Option B — "Use this template" button
 
-Click **Use this template** at the top of the GitHub page. Clone the new repo locally. Edit `repos.json` to declare your sibling repos. Run your bootstrap to populate them (see below).
+Click **Use this template** at the top of the GitHub page. Clone the new repo locally. Edit `household.json` to declare your sibling repos. Run your bootstrap to populate them (see below).
 
 ### Option C — `git clone`
 
@@ -32,7 +32,7 @@ rm -rf .git && git init && git add -A && git commit -m "initial workspace"
 
 ## Declaring sibling repos
 
-Edit `repos.json`:
+Edit `household.json`:
 
 ```json
 {
@@ -59,7 +59,7 @@ Edit `repos.json`:
 - Exists without `.git/` → it's an inline directory tracked as part of the meta-repo; arrives with the workspace clone.
 - Doesn't exist → user forgot to bootstrap; hard error.
 
-The starter `repos.json` in this template uses the inline shape for `lore/` — the KB lives inside the meta-repo's git history. To split it into its own repo later, see the "Splitting the lore" section below.
+The starter `household.json` in this template uses the inline shape for `lore/` — the KB lives inside the meta-repo's git history. To split it into its own repo later, see the "Splitting the lore" section below.
 
 ## Bootstrapping siblings
 
@@ -67,8 +67,8 @@ You own this step — write a `Makefile` target, a `bootstrap.sh`, or run `git c
 
 ```makefile
 setup:
-	@WORKSPACE=$$(jq -r '.workspace' repos.json); \
-	jq -r --arg ws "$$WORKSPACE" '.repos[] | select(.name != $$ws and .url) | "\(.name) \(.url)"' repos.json | \
+	@WORKSPACE=$$(jq -r '.workspace' household.json); \
+	jq -r --arg ws "$$WORKSPACE" '.repos[] | select(.name != $$ws and .url) | "\(.name) \(.url)"' household.json | \
 	while read name url; do \
 	  [ -d "$$name" ] || git clone "$$url" "$$name"; \
 	done
@@ -80,7 +80,7 @@ After bootstrap, each declared sibling is a populated git repo at `<workspace>/<
 
 ## The `lore/` knowledge base
 
-`lore/` ships as part of this template — initially tracked in the meta-repo for simplicity. The `lore` entry in `repos.json` has no `url`, signalling that it's inline. Replace `_starter.md` files with real knowledge as the workspace matures.
+`lore/` ships as part of this template — initially tracked in the meta-repo for simplicity. The `lore` entry in `household.json` has no `url`, signalling that it's inline. Replace `_starter.md` files with real knowledge as the workspace matures.
 
 ### Splitting the lore
 
@@ -97,7 +97,7 @@ git rm -r lore && git commit -m "split lore into its own repo"
 # 3. Clone your separate lore repo as a sibling.
 git clone <your-new-lore-repo> lore
 
-# 4. Edit repos.json: add a `url` to the `lore` entry so future
+# 4. Edit household.json: add a `url` to the `lore` entry so future
 #    contributors' bootstrap can clone it.
 ```
 

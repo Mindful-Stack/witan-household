@@ -2,13 +2,13 @@
 
 Workspace-level guidance for Claude Code across this household.
 
-This directory is a **witan-household meta-repo**. The manifest at `repos.json` declares which sibling repos make up the household; each is cloned alongside this one as a gitignored subdirectory. The Lorekeeper plugin (if installed) reads the knowledge base from `lore/` via its sibling-fallback resolution.
+This directory is a **witan-household meta-repo**. The manifest at `household.json` declares which sibling repos make up the household; each is cloned alongside this one as a gitignored subdirectory. The Lorekeeper plugin (if installed) reads the knowledge base from `lore/` via its sibling-fallback resolution.
 
 ## Layout
 
 ```
 my-workspace/                       ← this directory (the meta-repo)
-├── repos.json                      ← workspace manifest
+├── household.json                      ← workspace manifest
 ├── .devcontainer/devcontainer.json
 ├── CLAUDE.md                       ← you are here
 ├── lore/                           ← knowledge base (tracked in this repo by default)
