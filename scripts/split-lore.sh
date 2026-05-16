@@ -99,13 +99,13 @@ fi
 
 # household.json: if a remote was provided, set the lore entry's url
 if [ -n "$REMOTE" ]; then
-    node -e "
+    REMOTE="$REMOTE" node -e "
         const fs = require('fs');
         const path = './household.json';
         const m = JSON.parse(fs.readFileSync(path, 'utf8'));
         const kb = m.knowledge_base || 'lore';
         const entry = m.repos.find(r => r.name === kb);
-        if (entry) entry.url = '$REMOTE';
+        if (entry) entry.url = process.env.REMOTE;
         fs.writeFileSync(path, JSON.stringify(m, null, 2) + '\n');
     "
 fi
