@@ -115,4 +115,6 @@ git commit -m "split: lore is now a sibling repo"
 
 echo ""
 echo "Done. lore/ is now a sibling git repo."
-[ -n "$REMOTE" ] && echo "  Remote: $REMOTE"
+if [ -n "$REMOTE" ]; then
+    echo "  Remote: $REMOTE"
+fi
