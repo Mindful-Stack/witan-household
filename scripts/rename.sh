@@ -23,7 +23,7 @@ fi
 
 cd "$WORKSPACE"
 
-OLD_NAME=$(node -e "console.log(require('./household.json').workspace)")
+OLD_NAME=$(node -e "console.log(require('./household.json').meta_repo)")
 
 if [ "$OLD_NAME" = "$NEW_NAME" ]; then
     echo "Workspace name is already '$NEW_NAME'; nothing to do."
@@ -36,10 +36,10 @@ NEW_NAME="$NEW_NAME" node -e "
     const fs = require('fs');
     const path = './household.json';
     const m = JSON.parse(fs.readFileSync(path, 'utf8'));
-    const old = m.workspace;
+    const old = m.meta_repo;
     const next = process.env.NEW_NAME;
     const entry = m.repos.find(r => r.name === old);
-    m.workspace = next;
+    m.meta_repo = next;
     if (entry) entry.name = next;
     fs.writeFileSync(path, JSON.stringify(m, null, 2) + '\n');
 "

@@ -88,7 +88,7 @@ Edit `household.json`:
 
 ```json
 {
-  "workspace": "my-workspace",
+  "meta_repo": "my-workspace",
   "knowledge_base": "lore",
   "repos": [
     { "name": "my-workspace", "url": "git@github.com:you/my-workspace.git", "description": "The workspace meta-repo" },
@@ -119,7 +119,7 @@ You own this step — write a `Makefile` target, a `bootstrap.sh`, or run `git c
 
 ```makefile
 setup:
-	@WORKSPACE=$$(jq -r '.workspace' household.json); \
+	@WORKSPACE=$$(jq -r '.meta_repo' household.json); \
 	jq -r --arg ws "$$WORKSPACE" '.repos[] | select(.name != $$ws and .url) | "\(.name) \(.url)"' household.json | \
 	while read name url; do \
 	  [ -d "$$name" ] || git clone "$$url" "$$name"; \

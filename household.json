@@ -1,5 +1,5 @@
 {
-  "workspace": "my-workspace",
+  "meta_repo": "my-workspace",
   "knowledge_base": "lore",
   "repos": [
     {
