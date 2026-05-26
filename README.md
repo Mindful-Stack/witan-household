@@ -103,8 +103,8 @@ Edit `household.json`:
 - `name` is the manifest identifier; for non-workspace entries it's also the directory the sibling clones into.
 - `url` is **informational** — used by your bootstrap and by `reeve household show`. Reeve does NOT clone siblings from `url` at card-spawn time; it uses the local directory at `<workspace>/<name>/` as the `--reference` source.
 - `tags` is free-form categorisation.
-- `workspace` (top-level, required) is a singular pointer to the `repos[]` entry that IS the meta-repo itself.
-- `knowledge_base` (top-level, optional) is a singular pointer to the entry that holds the KB. Can equal `workspace` if the KB is part of the meta-repo with no separate KB entry. If unset, no KB is wired.
+- `meta_repo` (top-level, required) is a singular pointer to the `repos[]` entry that IS the meta-repo itself.
+- `knowledge_base` (top-level, optional) is a singular pointer to the entry that holds the KB. Can equal `meta_repo` if the KB is part of the meta-repo with no separate KB entry. If unset, no KB is wired.
 
 **Sibling vs inline (no manifest distinction — just disk state):** Reeve at clone time looks at each non-workspace `repos[]` entry's directory on the host:
 - Has its own `.git/` → it's a separate sibling repo; Reeve clones it for the card via `--reference --dissociate`.
