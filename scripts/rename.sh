@@ -30,7 +30,7 @@ if [ "$OLD_NAME" = "$NEW_NAME" ]; then
     exit 0
 fi
 
-# household.json: rewrite the `workspace` field AND the matching repos[] entry's name.
+# household.json: rewrite the `meta_repo` field AND the matching repos[] entry's name.
 # Pass NEW_NAME via env (process.env) to avoid shell-injection via the Node string interpolation.
 NEW_NAME="$NEW_NAME" node -e "
     const fs = require('fs');
