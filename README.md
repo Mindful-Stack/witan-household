@@ -102,10 +102,11 @@ Edit `household.json`:
 - `repos[]` lists every repo in the workspace, **including the workspace meta-repo itself**.
 - `name` is the manifest identifier; for non-workspace entries it's also the directory the sibling clones into.
 - `url` is **informational** — used by your bootstrap and by `reeve household show`. Reeve does NOT clone siblings from `url` at card-spawn time; it uses the local directory at `<workspace>/<name>/` as the `--reference` source.
-- `tags` is free-form categorisation.
-- `meta_repo` (top-level, required) is a singular pointer to the `repos[]` entry that IS the meta-repo itself.
+- `tags` is free-form categorisation. The `core` tag is special-cased by `make setup`: pressing Enter at the interactive prompt (or running `make setup-core`) clones just the core-tagged repos.
+- `meta_repo` (top-level, required) is a singular pointer to the `repos[]` entry that IS the meta-repo itself. Its `url` is also where the repo-lifecycle tooling derives your GitHub org from (`github.com/<org>/<repo>`) — no org is hardcoded anywhere.
 - `knowledge_base` (top-level, optional) is a singular pointer to the entry that holds the KB. Can equal `meta_repo` if the KB is part of the meta-repo with no separate KB entry. If unset, no KB is wired.
 - `shared_knowledge_bases` (top-level, optional) is an array of additional, lower-priority KB names — each a pointer to a `repos[]` entry, like `knowledge_base` — e.g. an org-wide standards repo layered underneath the team's own KB. Lorekeeper (1.1.0+) reads them in array order (lowest priority first), with `knowledge_base` highest and the only default write target. When the same relative file exists in more than one KB, the higher-priority file wins outright (whole-file replacement). Each name should also appear as a `repos[]` entry with a `url` so your bootstrap clones it; each directory must contain a `knowledge/` folder. Reeve ignores this field.
+- `branchProtection` (top-level, optional) may declare a `bypassTeam: { slug, id }` that the policy tooling grants a PR-mode bypass; per-repo `branchProtection: { requiredStatusCheck }` blocks declare the required CI status check (or `null`). Both are only needed if you use `make policy-*`.
 
 ```json
 {
@@ -127,18 +128,12 @@ The starter `household.json` in this template uses the inline shape for `lore/` 
 
 ## Bootstrapping siblings
 
-You own this step — write a `Makefile` target, a `bootstrap.sh`, or run `git clone` by hand. A minimal `make setup` target might look like:
+This template ships the bootstrap — run `make setup`:
 
-```makefile
-setup:
-	@WORKSPACE=$$(jq -r '.meta_repo' household.json); \
-	jq -r --arg ws "$$WORKSPACE" '.repos[] | select(.name != $$ws and .url) | "\(.name) \(.url)"' household.json | \
-	while read name url; do \
-	  [ -d "$$name" ] || git clone "$$url" "$$name"; \
-	done
-```
-
-(The filter skips the workspace entry — you're already inside it.)
+- **Interactive (default):** lists every manifest entry with a number, marks what's already on disk (`[✓]`) and what's `core`-tagged (`*`). Enter clones just core; `all` clones everything; `1,3,5` picks repos.
+- **Non-interactive:** `make setup-core`, `make setup-all`, or `./scripts/setup.sh --tag=backend | --repos=a,b`.
+- Along the way it enables the Lorekeeper plugin in each cloned sibling's `.claude/settings.local.json` (per-dev, never committed; an explicit opt-out is respected), refreshes the workspace `.claude/settings.json` from the `scripts/claude-settings.json` baseline, and sets `gh`'s git protocol to SSH so `gh`-driven clones match the manifest's `git@github.com:` remotes.
+- Re-run it anytime: already-present siblings are skipped, newly-declared ones get cloned.
 
 After bootstrap, each declared sibling is a populated git repo at `<workspace>/<name>/`. Both Reeve and Lorekeeper now have everything they need.
 
@@ -155,6 +150,63 @@ make setup                      # interactive picker in a terminal; clone-all wh
 ```
 
 Run with no flags in a terminal, it lists every cloneable sibling — marking those already cloned (`[✓]`) and those tagged `core` (`*`) — and lets you press Enter (core, or all when nothing is tagged `core`), type `all`, or pick by number (`1,3,5`). Run non-interactively (CI, the devcontainer `postCreateCommand`) it clones everything with a `url`, so automated setup stays unattended. Tag the repos most contributors need with `"core"` in `household.json` to make the Enter default useful.
+
+### Adopting an existing folder of sibling repos
+
+If you already have a folder with your sibling repos in it and want to make it a household:
+
+```sh
+cd /your/existing/folder
+git clone <your-household-repo-url> .witan-tmp
+.witan-tmp/scripts/setup.sh
+```
+
+`setup.sh` auto-detects the `.witan-tmp/` clone and switches to **adopt mode**: it moves the household's `.git` and files into your folder via `cp -rn` (never clobbering local files), removes `.witan-tmp/`, then continues with the normal flow. Divergent files are listed at the end for manual reconciliation (`git diff` / `git checkout`).
+
+## Workspace tooling
+
+`make help` lists every target. The shared targets live in `scripts/Makefile.shared`; the root `Makefile` includes it and adds the household-specific ones.
+
+### Day-to-day
+
+| Command | What it does |
+|---------|--------------|
+| `make status` | One-line `git status` per sibling (branch, dirty count, ahead/behind) |
+| `make pull` | `git fetch --prune` everywhere; ff-pulls clean `main`/`master` branches |
+| `make setup` | Re-run anytime: clones newly-added siblings, re-enables the plugin in each |
+
+### Managing repos
+
+| Command | What it does |
+|---------|--------------|
+| `make new-repo NAME=foo DESCRIPTION="..." [TAGS=t1,t2]` | Publish the current local repo to your GitHub org and register it in `household.json` (run with no vars for interactive mode) |
+| `make repo-rename OLD=foo NEW=bar` | Rename a repo end-to-end: GitHub rename + `household.json` update + opens a PR |
+| `make repos-sync-names` | Dry-run: sync local sibling dir names + remote URLs **to match** `household.json` — run after a rename PR merges to catch up |
+| `make repos-sync-names-apply` | Execute the renames + URL updates (interactive confirm) |
+| `make policy-audit` | Read-only drift check of branch protection across every repo (markdown table) |
+| `make policy-apply REPO=foo` | Apply the standard branch-protection policy to one repo (idempotent) |
+| `make policy-audit-write` | Audit + persist current state to `household.json` (bootstrap only — typically run once) |
+| `make test` | All unit tests: workspace scripts, manifest shape checks (`household-tests/`), lore tooling |
+
+The GitHub org for all of these is derived from the `meta_repo` entry's `url` in `household.json`. Entries without a `url` (inline directories like `lore/`) are skipped wherever a real GitHub repo is required. Auth uses whatever `gh auth status` reports.
+
+### About repo policy
+
+`scripts/repo-policy.mjs` keeps branch protection consistent across every repo in `household.json`. The standard (applied to each repo's default branch): blocks deletion + force-push, requires a PR with 1 review + thread resolution, allows squash-only merges, and — if `branchProtection.bypassTeam` is declared in the manifest — gives that team a PR-mode bypass. The bypass team is optional; without it the policy is simply strict for everyone.
+
+### Tips
+
+**VS Code / Cursor multi-root:** create a personal `workspace.code-workspace` file (gitignored) at the workspace root, then open via **File → Open Workspace from File…** to see each sibling as its own root in the sidebar:
+
+```json
+{
+  "folders": [
+    { "path": "." },
+    { "path": "backend" },
+    { "path": "frontend" }
+  ]
+}
+```
 
 ## Renaming a sibling repo
 

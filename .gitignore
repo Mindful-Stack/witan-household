@@ -8,10 +8,12 @@
 /*
 
 !/.devcontainer/
+!/.github/
 !/.gitignore
 !/CLAUDE.md
 !/Makefile
 !/README.md
 !/lore/
 !/household.json
+!/household-tests/
 !/scripts/

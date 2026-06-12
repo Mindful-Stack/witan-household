@@ -19,33 +19,37 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import * as readline from 'node:readline/promises';
 import path from 'node:path';
-import { parseRemoteUrl } from './manifest.mjs';
-
-// Re-exported so tooling and tests can import the URL parser from here.
-export { parseRemoteUrl };
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MANIFEST = path.join(__dirname, '..', 'household.json');
+const WORKSPACE_JSON = path.join(__dirname, '..', 'household.json');
 const WORKSPACE = path.join(__dirname, '..');
 
 // === Pure functions ============================================================
 
 /**
- * The set of GitHub orgs represented in the manifest's repo URLs. Used to decide
- * which unmatched siblings are worth a redirect lookup — we only ask GitHub
- * about repos under an org we actually track, never third-party clones.
- *
- * @param {object} manifest
- * @returns {Set<string>}
+ * Extract "<org>/<repo>" from a GitHub remote URL. Accepts SSH and HTTPS forms.
+ * @returns {string|null}
  */
-export function manifestOrgs(manifest) {
-  const orgs = new Set();
-  for (const repo of manifest.repos) {
-    const p = parseRemoteUrl(repo.url);
-    if (p) orgs.add(p.split('/')[0]);
-  }
-  return orgs;
+export function parseRemoteUrl(url) {
+  if (!url) return null;
+  let m = url.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (m) return m[1];
+  m = url.match(/^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (m) return m[1];
+  return null;
+}
+
+/**
+ * Derive the household's GitHub org from the manifest: the `meta_repo` field
+ * names the repos[] entry that is the meta-repo itself, and that entry's `url`
+ * points at github.com/<org>/<repo>.
+ */
+export function resolveOrg(manifest) {
+  const self = manifest.repos?.find(r => r.name === manifest.meta_repo);
+  const m = /github\.com[:/]([^/]+)\//.exec(self?.url || '');
+  if (!m) throw new Error('Cannot resolve GitHub org: household.json needs a meta_repo entry whose "url" points at github.com/<org>/<repo>.');
+  return m[1];
 }
 
 /**
@@ -74,6 +78,10 @@ export function manifestOrgs(manifest) {
 export function planActions(manifest, siblings) {
   const pathToEntry = new Map();
   for (const repo of manifest.repos) {
+    // The meta-repo entry is the household root itself, never a rename
+    // candidate. Url-less entries are inline dirs tracked in the meta-repo
+    // (no own .git); parseRemoteUrl returns null for them anyway.
+    if (repo.name === manifest.meta_repo) continue;
     const p = parseRemoteUrl(repo.url);
     if (p) pathToEntry.set(p, repo);
   }
@@ -163,7 +171,7 @@ async function resolveRedirect(githubPath) {
   }
 }
 
-async function listSiblings(workspaceDir, manifest) {
+async function listSiblings(workspaceDir, manifest, org) {
   const entries = await readdir(workspaceDir, { withFileTypes: true });
   const siblings = [];
   for (const e of entries) {
@@ -173,15 +181,13 @@ async function listSiblings(workspaceDir, manifest) {
     try {
       const s = await stat(path.join(dirPath, '.git'));
       hasGit = s.isDirectory() || s.isFile();
-    } catch { /* no .git */ }
+    } catch { /* no .git — e.g. an inline dir like lore/ tracked in the meta-repo */ }
     const remoteUrl = hasGit ? await getRemoteUrl(dirPath) : null;
     siblings.push({ dirName: e.name, remoteUrl });
   }
 
-  // For URLs under an org we track but that aren't in the manifest, ask GitHub
-  // whether the repo was renamed. Runs in parallel; failures are silently
-  // ignored. Third-party clones (orgs not in the manifest) are left alone.
-  const orgs = manifestOrgs(manifest);
+  // For household-org URLs that aren't in the manifest, ask GitHub whether
+  // the repo was renamed. Runs in parallel; failures are silently ignored.
   const manifestPaths = new Set(
     manifest.repos.map(r => parseRemoteUrl(r.url)).filter(Boolean),
   );
@@ -189,7 +195,7 @@ async function listSiblings(workspaceDir, manifest) {
     if (!sib.remoteUrl) return;
     const p = parseRemoteUrl(sib.remoteUrl);
     if (!p || manifestPaths.has(p)) return;
-    if (!orgs.has(p.split('/')[0])) return;
+    if (!p.startsWith(`${org}/`)) return;
     sib.resolvedGithubPath = await resolveRedirect(p);
   }));
 
@@ -218,13 +224,13 @@ export function describeAction(a) {
   return `${a.dirName}  (update remote URL)`;
 }
 
-function printPlan(plan) {
+function printPlan(plan, org) {
   const canon = [...plan.alreadyCanonical].sort();
   const acts = [...plan.actions].sort((a, b) => a.dirName.localeCompare(b.dirName));
 
-  console.log('Workspace siblings:');
+  console.log('Household siblings:');
   if (canon.length === 0 && acts.length === 0) {
-    console.log('  (no managed repos detected)');
+    console.log(`  (no ${org} repos detected)`);
   } else {
     for (const c of canon) console.log(`  ✓ ${c}`);
     for (const a of acts) {
@@ -281,17 +287,20 @@ For each sibling directory, the script:
      AND the directory is renamed to match the manifest.
   4. Otherwise the directory is reported as 'unmatched'.
 
-Dirs whose URL's org isn't represented in household.json are left alone.
+The GitHub org is derived from household.json's meta_repo entry (its "url"
+must point at github.com/<org>/<repo>). Dirs whose URL isn't for that org —
+and inline dirs without their own .git (e.g. lore/) — are left alone.
 Falls back to URL-exact matching when \`gh\` is unavailable.
 `);
     return;
   }
 
-  const manifest = JSON.parse(await readFile(MANIFEST, 'utf8'));
-  const siblings = await listSiblings(WORKSPACE, manifest);
+  const manifest = JSON.parse(await readFile(WORKSPACE_JSON, 'utf8'));
+  const org = resolveOrg(manifest);
+  const siblings = await listSiblings(WORKSPACE, manifest, org);
   const plan = planActions(manifest, siblings);
 
-  printPlan(plan);
+  printPlan(plan, org);
 
   if (plan.actions.length === 0) return;
 
@@ -306,7 +315,7 @@ Falls back to URL-exact matching when \`gh\` is unavailable.
     console.error('');
     console.error(`Cannot apply: current working directory is inside "${blocker.dirName}".`);
     console.error('Renaming the directory would invalidate this shell\'s cwd.');
-    console.error('Re-run from the workspace root (or any directory outside the pending rename).');
+    console.error('Re-run from the household root (or any directory outside the pending rename).');
     process.exit(1);
   }
 
