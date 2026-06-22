@@ -105,7 +105,7 @@ Edit `household.json`:
 - `tags` is free-form categorisation.
 - `meta_repo` (top-level, required) is a singular pointer to the `repos[]` entry that IS the meta-repo itself.
 - `knowledge_base` (top-level, optional) is a singular pointer to the entry that holds the KB. Can equal `meta_repo` if the KB is part of the meta-repo with no separate KB entry. If unset, no KB is wired.
-- `shared_knowledge_bases` (top-level, optional) is an array of additional, lower-priority KB directory names — e.g. an org-wide standards repo layered underneath the team's own KB. Lorekeeper (1.1.0+) reads them in array order (lowest priority first), with `knowledge_base` highest and the only default write target. When the same relative file exists in more than one KB, the higher-priority file wins outright (whole-file replacement). Each name should also appear as a `repos[]` entry with a `url` so your bootstrap clones it; each directory must contain a `knowledge/` folder. Reeve ignores this field.
+- `shared_knowledge_bases` (top-level, optional) is an array of additional, lower-priority KB names — each a pointer to a `repos[]` entry, like `knowledge_base` — e.g. an org-wide standards repo layered underneath the team's own KB. Lorekeeper (1.1.0+) reads them in array order (lowest priority first), with `knowledge_base` highest and the only default write target. When the same relative file exists in more than one KB, the higher-priority file wins outright (whole-file replacement). Each name should also appear as a `repos[]` entry with a `url` so your bootstrap clones it; each directory must contain a `knowledge/` folder. Reeve ignores this field.
 
 ```json
 {
