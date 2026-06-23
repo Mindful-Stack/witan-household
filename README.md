@@ -142,6 +142,25 @@ setup:
 
 After bootstrap, each declared sibling is a populated git repo at `<workspace>/<name>/`. Both Reeve and Lorekeeper now have everything they need.
 
+## Renaming a sibling repo
+
+When a sibling repo needs a new name, do it once at the source and let teammates reconcile automatically — `household.json` is the single source of truth for repo names.
+
+```sh
+make repo-rename OLD=old-name NEW=new-name
+```
+
+This renames the repo on GitHub (org read from the entry's own `url`), updates the matching `household.json` entry's `name` and `url`, then branches, commits, and opens a PR. Pass `--no-github` (e.g. `node ./scripts/repo-rename.mjs old new --no-github`) if you already renamed it on GitHub by hand.
+
+After the PR merges, each teammate catches their local checkout up:
+
+```sh
+make repos-sync-names         # dry-run: show what would change
+make repos-sync-names-apply   # rename local dirs + fix stale origin URLs
+```
+
+`repos-sync-names` matches each sibling directory to `household.json` by its `origin` URL. When a URL is stale (the repo was renamed on GitHub), it follows GitHub's redirect via `gh api` to find the canonical entry, then renames the local directory and updates the remote URL to match the manifest. Directories whose org isn't represented in `household.json` are left untouched.
+
 ## The `lore/` knowledge base
 
 `lore/` ships as part of this template — initially tracked in the meta-repo for simplicity. The `lore` entry in `household.json` has no `url`, signalling that it's inline. Replace `_starter.md` files with real knowledge as the workspace matures.
