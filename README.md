@@ -142,6 +142,20 @@ setup:
 
 After bootstrap, each declared sibling is a populated git repo at `<workspace>/<name>/`. Both Reeve and Lorekeeper now have everything they need.
 
+### Selecting which siblings to clone
+
+The shipped `scripts/setup.sh` (run via `make setup`) does the above and adds selection modes so a large workspace doesn't have to clone everything:
+
+```sh
+make setup                      # interactive picker in a terminal; clone-all when non-interactive
+./scripts/setup.sh --core       # only repos tagged "core"
+./scripts/setup.sh --all        # every sibling that has a url
+./scripts/setup.sh --tag=web    # only repos tagged "web"
+./scripts/setup.sh --repos=a,b  # only the named repos
+```
+
+Run with no flags in a terminal, it lists every cloneable sibling — marking those already cloned (`[✓]`) and those tagged `core` (`*`) — and lets you press Enter (core, or all when nothing is tagged `core`), type `all`, or pick by number (`1,3,5`). Run non-interactively (CI, the devcontainer `postCreateCommand`) it clones everything with a `url`, so automated setup stays unattended. Tag the repos most contributors need with `"core"` in `household.json` to make the Enter default useful.
+
 ## Renaming a sibling repo
 
 When a sibling repo needs a new name, do it once at the source and let teammates reconcile automatically — `household.json` is the single source of truth for repo names.
