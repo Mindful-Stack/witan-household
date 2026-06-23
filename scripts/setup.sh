@@ -162,11 +162,29 @@ case "$MODE" in
                 SELECTED="$(select_repos all '' '')"
                 ;;
             *)
-                # Map comma-separated 1-based indices to candidate lines.
-                # Trailing newline matters: without it `read` drops the last index.
-                SELECTED="$(printf '%s\n' "$CHOICE" | tr ',' '\n' | while read -r n; do
-                    n="$(printf '%s' "$n" | tr -d '[:space:]')"
-                    [ -n "$n" ] || continue
+                # Map 1-based indices to candidate lines. Validate every token as
+                # an in-range positive integer first — raw input must never reach
+                # `sed`, and a bad token must not silently clone an empty URL.
+                CAND_COUNT=$(printf '%s\n' "$CAND" | grep -c .)
+                PICKS=""
+                INVALID=""
+                OLDIFS=$IFS; IFS=', '
+                for tok in $CHOICE; do
+                    [ -n "$tok" ] || continue
+                    if printf '%s' "$tok" | grep -qE '^[0-9]+$' \
+                        && [ "$tok" -ge 1 ] && [ "$tok" -le "$CAND_COUNT" ]; then
+                        PICKS="$PICKS $tok"
+                    else
+                        INVALID="$INVALID $tok"
+                    fi
+                done
+                IFS=$OLDIFS
+                if [ -n "$INVALID" ]; then
+                    echo "  ERROR: invalid selection(s):$INVALID" >&2
+                    echo "  Expected numbers 1-$CAND_COUNT (comma-separated), 'all', or Enter." >&2
+                    exit 1
+                fi
+                SELECTED="$(for n in $PICKS; do
                     printf '%s\n' "$CAND" | sed -n "${n}p" | cut -f1,2
                 done)"
                 ;;
