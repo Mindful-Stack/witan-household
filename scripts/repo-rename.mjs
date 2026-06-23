@@ -23,7 +23,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import * as readline from 'node:readline/promises';
 import path from 'node:path';
-import { formatRepos, parseRemoteUrl } from './manifest.mjs';
+import { formatRepos, parseRemoteUrl, renameRepoInUrl } from './manifest.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -75,7 +75,7 @@ export function applyRenameToManifest(manifest, oldName, newName) {
     return {
       ...r,
       name: newName,
-      url: r.url ? r.url.replace(`/${oldName}.git`, `/${newName}.git`) : r.url,
+      url: renameRepoInUrl(r.url, oldName, newName),
     };
   });
   return { ...manifest, repos };
@@ -173,7 +173,7 @@ async function main() {
 
   const branch = `rename-${oldName}-to-${newName}`;
   const newUrl = oldEntry.url
-    ? oldEntry.url.replace(`/${oldName}.git`, `/${newName}.git`)
+    ? renameRepoInUrl(oldEntry.url, oldName, newName)
     : '(none)';
 
   console.log(`About to rename: ${oldName} → ${newName}`);

@@ -78,6 +78,18 @@ describe('applyRenameToManifest', () => {
     assert.equal(entry.url, undefined);
   });
 
+  it('updates a URL with no .git suffix (keeps name and url consistent)', () => {
+    // Regression: parseRemoteUrl accepts suffix-less URLs, so applyRename must
+    // rewrite them too — otherwise the entry name and url diverge.
+    const m = {
+      meta_repo: 'acme-workspace',
+      repos: [{ name: 'backend', url: 'https://github.com/Acme-Org/backend', description: '', tags: [] }],
+    };
+    const updated = applyRenameToManifest(m, 'backend', 'api');
+    const entry = updated.repos.find(r => r.name === 'api');
+    assert.equal(entry.url, 'https://github.com/Acme-Org/api');
+  });
+
   it('only replaces the URL basename, not other occurrences of the name in URL parts', () => {
     // Edge case: org name shouldn't be touched even if it happens to contain
     // a substring of the old name.

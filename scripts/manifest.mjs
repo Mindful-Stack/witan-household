@@ -18,6 +18,24 @@ export function parseRemoteUrl(url) {
 }
 
 /**
+ * Rewrite the trailing repo name in a remote URL, preserving its form. Matches
+ * the final `/<oldName>` segment with an optional `.git` suffix, anchored at the
+ * end of the string, so it works for SSH and HTTPS URLs with or without `.git`
+ * and never touches an org segment that happens to share the name. Returns the
+ * URL unchanged when it's falsy or doesn't end in `<oldName>`.
+ *
+ * @param {string|null|undefined} url
+ * @param {string} oldName
+ * @param {string} newName
+ * @returns {string|null|undefined}
+ */
+export function renameRepoInUrl(url, oldName, newName) {
+  if (!url) return url;
+  const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return url.replace(new RegExp(`/${escaped}(\\.git)?$`), `/${newName}$1`);
+}
+
+/**
  * Serialise a manifest back to JSON the way household.json is hand-authored:
  * 2-space indent, but short all-string arrays (e.g. `tags`) re-inlined onto a
  * single line when they fit under 80 columns. Keeps diffs minimal when a script
