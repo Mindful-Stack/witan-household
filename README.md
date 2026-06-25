@@ -75,7 +75,7 @@ Same as Scenario 4, plus move your existing KB repo into the workspace as `lore/
 
 Lorekeeper is installed in **two distinct contexts**:
 
-1. **On your host** — for direct Claude Code use outside any devcontainer. Install via `/plugin marketplace add Mindful-Stack/witan` + `/plugin install lorekeeper@witan`.
+1. **On your host** — for direct Claude Code use outside any devcontainer. Install via `/plugin marketplace add Mindful-Stack/witan` + `/plugin install lore@witan`.
 2. **Inside every Reeve card's container** — automatically, via this template's `.devcontainer/devcontainer.json` `postCreateCommand`.
 
 Same plugin, two install paths, both deliberate. The host install serves general CC work; the container install serves Reeve cards (which run with `--dangerously-skip-permissions`). They don't share state.
@@ -209,6 +209,6 @@ To install the Lorekeeper plugin inside the container, append to `postCreateComm
 ```jsonc
 "postCreateCommand": [
   "curl -fsSL https://claude.ai/install.sh | bash",
-  "claude plugin marketplace add Mindful-Stack/witan && claude plugin install lorekeeper@witan"
+  "claude plugin marketplace add Mindful-Stack/witan && claude plugin install lore@witan"
 ]
 ```
