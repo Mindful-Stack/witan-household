@@ -22,7 +22,7 @@
 //   ./scripts/repo-rename.mjs OLD NEW --yes          Skip the confirmation prompt
 //   ./scripts/repo-rename.mjs OLD NEW --rename-local  Also rename the local sibling folder
 
-import { readFile, writeFile, rename as fsRename, stat } from 'node:fs/promises';
+import { readFile, writeFile, rename as fsRename, stat, unlink } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +49,7 @@ const WORKSPACE = path.join(__dirname, '..');
  * @param {object} manifest - parsed household.json
  * @returns {string} the GitHub org
  */
+// Retained for test coverage; superseded in production by deriveGithubTarget/parseRemoteUrl.
 export function resolveOrg(manifest) {
   const self = manifest.repos?.find(r => r.name === manifest.meta_repo);
   const m = /github\.com[:/]([^/]+)\//.exec(self?.url || '');
@@ -188,8 +189,13 @@ async function currentBranch(dir) {
 
 async function writeFileAtomic(filePath, content) {
   const tmp = filePath + '.tmp';
-  await writeFile(tmp, content);
-  await fsRename(tmp, filePath);
+  try {
+    await writeFile(tmp, content);
+    await fsRename(tmp, filePath);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});   // best-effort cleanup; ignore if absent
+    throw e;
+  }
 }
 
 async function promptLine(question) {
@@ -300,8 +306,15 @@ async function main() {
     }
 
     if (!renameLocal) {
-      const ans = await promptLine(`Also rename the local folder '${oldName}' → '${newName}'? [y/N] `);
-      renameLocal = /^y(es)?$/i.test(ans.trim());
+      const localOldPath = path.join(WORKSPACE, oldName);
+      let localFolderExists = false;
+      try { await stat(localOldPath); localFolderExists = true; } catch { /* absent */ }
+      if (localFolderExists) {
+        const ans = await promptLine(`Also rename the local folder '${oldName}' → '${newName}'? [y/N] `);
+        renameLocal = /^y(es)?$/i.test(ans.trim());
+      } else {
+        console.log(`  Note: no local folder "${oldName}" found — skipping rename-local prompt.`);
+      }
     }
   } else if (positional.length === 2) {
     [oldName, newName] = positional;
@@ -391,7 +404,9 @@ async function main() {
   await writeFileAtomic(WORKSPACE_JSON, formatRepos(updated));
 
   // 2b. Optional local folder rename
-  if (renameLocal && hasUrl) {
+  if (renameLocal && !hasUrl) {
+    console.log(`  Note: --rename-local ignored — "${oldName}" is an inline directory (no url; not a separate git repo).`);
+  } else if (renameLocal && hasUrl) {
     const localOldPath = path.join(WORKSPACE, oldName);
     let localExists = false;
     try {

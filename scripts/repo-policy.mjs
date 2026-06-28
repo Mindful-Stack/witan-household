@@ -41,7 +41,7 @@
 //      any unapplied manual edits to household.json — don't run it between editing
 //      and applying.
 
-import { readFile, writeFile, rename as fsRename } from 'node:fs/promises';
+import { readFile, writeFile, rename as fsRename, unlink } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -54,8 +54,13 @@ const HOUSEHOLD_JSON = path.join(__dirname, '..', 'household.json');
 
 async function writeFileAtomic(filePath, content) {
   const tmp = filePath + '.tmp';
-  await writeFile(tmp, content);
-  await fsRename(tmp, filePath);
+  try {
+    await writeFile(tmp, content);
+    await fsRename(tmp, filePath);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});   // best-effort cleanup; ignore if absent
+    throw e;
+  }
 }
 
 const RULESET_NAME = 'main protection';
