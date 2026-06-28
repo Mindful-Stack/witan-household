@@ -45,7 +45,7 @@ while IFS= read -r NAME; do
         echo "$NAME: not cloned locally (skipped — run make setup)"
         continue
     fi
-    if [ ! -d "$NAME/.git" ]; then
+    if ! git -C "$NAME" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         echo "$NAME: not a git repo (skipped)"
         continue
     fi

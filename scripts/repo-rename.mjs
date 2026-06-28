@@ -348,9 +348,27 @@ async function main() {
   const hasUrl = Boolean(oldEntry.url);
   const ghTarget = hasUrl ? deriveGithubTarget(oldEntry) : null;
 
+  // Fix 1: fail fast when a url is present but unparseable (non-GitHub host, malformed)
+  // and the user has not asserted they handled GitHub themselves.
+  if (hasUrl && !ghTarget && !noGithub) {
+    console.error(`Error: could not parse a GitHub org/repo from url "${oldEntry.url}" for "${oldName}". If the repo was already renamed on GitHub, re-run with --no-github.`);
+    process.exit(1);
+  }
+
   if (!(await isWorkingTreeClean(WORKSPACE))) {
     console.error('Error: household meta-repo has uncommitted changes. Commit or stash first.');
     process.exit(1);
+  }
+
+  // Fix 2: preflight local rename before any remote/manifest mutation
+  if (renameLocal && hasUrl) {
+    const localNewPath = path.join(WORKSPACE, newName);
+    let newAlreadyExists = false;
+    try { await stat(localNewPath); newAlreadyExists = true; } catch { /* absent — good */ }
+    if (newAlreadyExists) {
+      console.error(`Error: cannot rename local folder — "${newName}" already exists in the workspace. Resolve the conflict first.`);
+      process.exit(1);
+    }
   }
 
   const branch = `rename-${oldName}-to-${newName}`;
@@ -404,6 +422,8 @@ async function main() {
   await writeFileAtomic(WORKSPACE_JSON, formatRepos(updated));
 
   // 2b. Optional local folder rename
+  // Fix 3: track actual outcome (not just the request) for accurate PR body
+  let localRenamed = false;
   if (renameLocal && !hasUrl) {
     console.log(`  Note: --rename-local ignored — "${oldName}" is an inline directory (no url; not a separate git repo).`);
   } else if (renameLocal && hasUrl) {
@@ -417,6 +437,7 @@ async function main() {
     if (localExists) {
       const localNewPath = path.join(WORKSPACE, newName);
       await fsRename(localOldPath, localNewPath);
+      localRenamed = true;
       console.log(`  Renamed local folder: ${oldName} → ${newName}`);
       if (newUrl) {
         await execFileP('git', ['-C', localNewPath, 'remote', 'set-url', 'origin', newUrl]);
@@ -443,7 +464,7 @@ async function main() {
   const ghRename = ghTarget
     ? `GitHub repo \`${ghTarget.org}/${ghTarget.repo}\` renamed to \`${ghTarget.org}/${newName}\` via \`gh repo edit\` (handled by \`repo-rename.mjs\`).`
     : '';
-  const localNote = renameLocal
+  const localNote = localRenamed
     ? `Local folder \`${oldName}\` was renamed to \`${newName}\` and its remote URL updated on this machine.`
     : `Local folder was NOT renamed — teammates (and this machine) should run \`make repos-sync-names-apply\` to reconcile.`;
 
