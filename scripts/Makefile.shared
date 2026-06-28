@@ -11,7 +11,7 @@
 .PHONY: setup setup-core setup-all pull status \
         new-repo repo-rename repos-sync-names repos-sync-names-apply \
         policy-audit policy-audit-write policy-apply policy-help \
-        test-scripts
+        update-kb test-scripts
 
 setup:   ## Interactive: pick sibling repos to clone (Enter = core)
 	@./scripts/setup.sh
@@ -31,12 +31,8 @@ status:  ## One-line git status per sibling
 new-repo: ## Publish current repo to your org + register in household.json (NAME= DESCRIPTION= [TAGS=])
 	@./scripts/new-repo.mjs --name="$(NAME)" --description="$(DESCRIPTION)" --tags="$(TAGS)"
 
-repo-rename: ## Rename a repo end-to-end: GitHub + household.json + PR (OLD= NEW=)
-	@if [ -z "$(OLD)" ] || [ -z "$(NEW)" ]; then \
-		echo "Usage: make repo-rename OLD=<old-name> NEW=<new-name>"; \
-		exit 1; \
-	fi
-	@./scripts/repo-rename.mjs $(OLD) $(NEW)
+repo-rename: ## Rename a repo end-to-end: GitHub + household.json + PR. No args = interactive picker; or OLD= NEW= [LOCAL=1]
+	@./scripts/repo-rename.mjs $(OLD) $(NEW) $(if $(LOCAL),--rename-local)
 
 repos-sync-names: ## Dry-run: sync local sibling dirs + remote URLs with household.json
 	@./scripts/repos-sync-names.mjs
@@ -55,6 +51,9 @@ policy-apply: ## Apply the standard branch-protection policy (REPO=<name>)
 
 policy-help: ## Show repo-policy.mjs full --help
 	@./scripts/repo-policy.mjs help
+
+update-kb: ## Pull every knowledge-base repo listed in household.json (ff-only, clean main)
+	@./scripts/update-kb.sh
 
 test-scripts: ## Run the workspace scripts' unit tests
 	@node --test scripts/*.test.mjs

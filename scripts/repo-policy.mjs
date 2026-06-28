@@ -41,7 +41,7 @@
 //      any unapplied manual edits to household.json — don't run it between editing
 //      and applying.
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rename as fsRename, unlink } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +51,17 @@ import path from 'node:path';
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOUSEHOLD_JSON = path.join(__dirname, '..', 'household.json');
+
+async function writeFileAtomic(filePath, content) {
+  const tmp = filePath + '.tmp';
+  try {
+    await writeFile(tmp, content);
+    await fsRename(tmp, filePath);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});   // best-effort cleanup; ignore if absent
+    throw e;
+  }
+}
 
 const RULESET_NAME = 'main protection';
 
@@ -552,7 +563,7 @@ async function cmdAudit({ write }) {
         r.repo.branchProtection.requiredStatusCheck = null;
       }
     }
-    await writeFile(HOUSEHOLD_JSON, formatRepos(manifest), 'utf8');
+    await writeFileAtomic(HOUSEHOLD_JSON, formatRepos(manifest));
     console.error(`\nWrote inferred branchProtection config to ${path.relative(process.cwd(), HOUSEHOLD_JSON)}`);
   } else {
     console.error('\n(read-only audit; pass --write to bootstrap household.json)');
