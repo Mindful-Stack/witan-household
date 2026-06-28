@@ -11,7 +11,7 @@
 .PHONY: setup setup-core setup-all pull status \
         new-repo repo-rename repos-sync-names repos-sync-names-apply \
         policy-audit policy-audit-write policy-apply policy-help \
-        test-scripts
+        update-kb test-scripts
 
 setup:   ## Interactive: pick sibling repos to clone (Enter = core)
 	@./scripts/setup.sh
@@ -55,6 +55,9 @@ policy-apply: ## Apply the standard branch-protection policy (REPO=<name>)
 
 policy-help: ## Show repo-policy.mjs full --help
 	@./scripts/repo-policy.mjs help
+
+update-kb: ## Pull every knowledge-base repo listed in household.json (ff-only, clean main)
+	@./scripts/update-kb.sh
 
 test-scripts: ## Run the workspace scripts' unit tests
 	@node --test scripts/*.test.mjs
