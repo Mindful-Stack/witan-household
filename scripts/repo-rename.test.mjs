@@ -1,7 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { validateRename, applyRenameToManifest, resolveOrg, renameRepoInUrl } from './repo-rename.mjs';
+import {
+  validateRename,
+  applyRenameToManifest,
+  resolveOrg,
+  renameRepoInUrl,
+  deriveGithubTarget,
+  validateNewName,
+} from './repo-rename.mjs';
 
 const manifest = {
   meta_repo: 'acme-household',
@@ -11,6 +18,17 @@ const manifest = {
     { name: 'acme-foo', url: 'git@github.com:acme-org/acme-foo.git', description: 'Foo', tags: ['core'] },
     { name: 'acme-bar', url: 'git@github.com:acme-org/acme-bar.git', description: 'Bar', tags: [] },
     { name: 'lore', description: 'Inline knowledge base (no url)' },
+  ],
+};
+
+// Manifest where the manifest name differs from the GitHub repo name.
+const manifestMismatch = {
+  meta_repo: 'acme-household',
+  knowledge_base: 'lore',
+  repos: [
+    { name: 'acme-household', url: 'git@github.com:acme-org/acme-household.git', description: 'The meta-repo', tags: ['core'] },
+    { name: 'file-extractor', url: 'git@github.com:acme-org/File-Extract-API.git', description: 'Extractor', tags: [] },
+    { name: 'lore', description: 'Inline KB' },
   ],
 };
 
@@ -35,6 +53,67 @@ describe('validateRename', () => {
   it('throws when either name is empty', () => {
     assert.throws(() => validateRename(manifest, '', 'acme-baz'), /required/);
     assert.throws(() => validateRename(manifest, 'acme-foo', ''), /required/);
+  });
+});
+
+describe('validateNewName', () => {
+  it('accepts a valid new name', () => {
+    // Should not throw
+    validateNewName('acme-baz', 'acme-foo', manifest);
+  });
+
+  it('rejects an empty new name', () => {
+    assert.throws(() => validateNewName('', 'acme-foo', manifest), /required/);
+  });
+
+  it('rejects names with invalid chars', () => {
+    assert.throws(() => validateNewName('acme foo', 'acme-bar', manifest), /valid repo name/);
+    assert.throws(() => validateNewName('acme/foo', 'acme-bar', manifest), /valid repo name/);
+    assert.throws(() => validateNewName('acme@foo', 'acme-bar', manifest), /valid repo name/);
+  });
+
+  it('rejects new name equal to old name', () => {
+    assert.throws(() => validateNewName('acme-foo', 'acme-foo', manifest), /identical/);
+  });
+
+  it('rejects new name that collides with an existing manifest entry', () => {
+    assert.throws(() => validateNewName('acme-bar', 'acme-foo', manifest), /already has an entry/);
+  });
+
+  it('allows dots and underscores in names', () => {
+    // Should not throw
+    validateNewName('acme.bar_v2', 'acme-foo', manifest);
+  });
+});
+
+describe('deriveGithubTarget', () => {
+  it('returns org and repo from an SSH url', () => {
+    const entry = { name: 'file-extractor', url: 'git@github.com:acme-org/File-Extract-API.git' };
+    const t = deriveGithubTarget(entry);
+    assert.deepEqual(t, { org: 'acme-org', repo: 'File-Extract-API' });
+  });
+
+  it('returns org and repo from an HTTPS url', () => {
+    const entry = { name: 'backend', url: 'https://github.com/Acme-Org/backend-api.git' };
+    const t = deriveGithubTarget(entry);
+    assert.deepEqual(t, { org: 'Acme-Org', repo: 'backend-api' });
+  });
+
+  it('returns null when entry has no url', () => {
+    const entry = { name: 'lore' };
+    assert.equal(deriveGithubTarget(entry), null);
+  });
+
+  it('returns null for a non-GitHub url', () => {
+    const entry = { name: 'foo', url: 'git@gitlab.com:org/foo.git' };
+    assert.equal(deriveGithubTarget(entry), null);
+  });
+
+  it('repo segment reflects the real GitHub repo name, not the manifest name', () => {
+    const entry = { name: 'file-extractor', url: 'git@github.com:acme-org/File-Extract-API.git' };
+    const t = deriveGithubTarget(entry);
+    assert.equal(t.repo, 'File-Extract-API');
+    assert.notEqual(t.repo, entry.name);
   });
 });
 
@@ -134,6 +213,34 @@ describe('applyRenameToManifest', () => {
     const updated = applyRenameToManifest(manifest, 'acme-bar', 'acme-qux');
     assert.equal(updated.meta_repo, 'acme-household');
     assert.equal(updated.knowledge_base, 'lore');
+  });
+});
+
+describe('applyRenameToManifest with mismatched name/github-repo', () => {
+  it('updates the entry name to NEW when manifest name differs from github repo name', () => {
+    const updated = applyRenameToManifest(manifestMismatch, 'file-extractor', 'file-extractor-v2');
+    const entry = updated.repos.find(r => r.name === 'file-extractor-v2');
+    assert.ok(entry, 'renamed entry must exist under new name');
+  });
+
+  it('rewrites the url repo segment to NEW using the current github repo name (not manifest name)', () => {
+    // manifest name: 'file-extractor', github repo: 'File-Extract-API'
+    // After rename to 'file-extractor-v2', the url should end in /file-extractor-v2.git
+    const updated = applyRenameToManifest(manifestMismatch, 'file-extractor', 'file-extractor-v2');
+    const entry = updated.repos.find(r => r.name === 'file-extractor-v2');
+    assert.equal(entry.url, 'git@github.com:acme-org/file-extractor-v2.git');
+  });
+
+  it('leaves other entries in the mismatch manifest untouched', () => {
+    const updated = applyRenameToManifest(manifestMismatch, 'file-extractor', 'file-extractor-v2');
+    const household = updated.repos.find(r => r.name === 'acme-household');
+    assert.equal(household.url, 'git@github.com:acme-org/acme-household.git');
+  });
+
+  it('does not mutate the mismatch manifest', () => {
+    const original = JSON.parse(JSON.stringify(manifestMismatch));
+    applyRenameToManifest(manifestMismatch, 'file-extractor', 'file-extractor-v2');
+    assert.deepEqual(manifestMismatch, original);
   });
 });
 

@@ -7,20 +7,22 @@
 //
 // What it does:
 //   1. Validate: OLD exists in household.json, NEW doesn't conflict, working tree clean.
-//   2. (unless --no-github) Rename on GitHub: `gh repo edit <org>/OLD --rename NEW`.
-//      The org is derived from the meta_repo entry's url in household.json.
-//      Entries without a `url` (inline directories) skip this step.
+//   2. (unless --no-github) Rename on GitHub: `gh repo edit <org>/<current-github-repo> --rename NEW`.
+//      The org and current GitHub repo name are derived from the entry's `url` in household.json
+//      (NOT from the manifest name — they may differ). Entries without a `url` skip this step.
 //   3. Update household.json in place (entry's name + url; top-level meta_repo /
 //      knowledge_base if the renamed entry is the meta-repo / knowledge base).
 //   4. Branch + commit + push + open PR via `gh pr create`.
 //   5. Print next steps.
 //
 // Usage:
-//   ./scripts/repo-rename.mjs OLD NEW                Full flow
+//   ./scripts/repo-rename.mjs                    Interactive: pick repo + enter new name
+//   ./scripts/repo-rename.mjs OLD NEW            Full flow
 //   ./scripts/repo-rename.mjs OLD NEW --no-github    Skip GH rename (already done)
 //   ./scripts/repo-rename.mjs OLD NEW --yes          Skip the confirmation prompt
+//   ./scripts/repo-rename.mjs OLD NEW --rename-local  Also rename the local sibling folder
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rename as fsRename, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +30,7 @@ import * as readline from 'node:readline/promises';
 import path from 'node:path';
 
 import { formatRepos } from './repo-policy.mjs';
+import { parseRemoteUrl } from './repos-sync-names.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +57,23 @@ export function resolveOrg(manifest) {
 }
 
 /**
+ * Derive the current GitHub org and repo name from an entry's `url`.
+ * Returns `{ org, repo }` where `repo` is the real GitHub repo name (which
+ * may differ from the manifest name). Returns null when the entry has no url
+ * or the url is not a recognisable GitHub url.
+ *
+ * @param {object} entry - a repos[] entry from household.json
+ * @returns {{ org: string, repo: string } | null}
+ */
+export function deriveGithubTarget(entry) {
+  if (!entry.url) return null;
+  const parsed = parseRemoteUrl(entry.url);
+  if (!parsed) return null;
+  const [org, repo] = parsed.split('/');
+  return { org, repo };
+}
+
+/**
  * Rewrite the trailing repo name in a remote URL, preserving its form. Matches
  * the final `/<oldName>` segment with an optional `.git` suffix, anchored at the
  * end of the string, so it works for SSH and HTTPS URLs with or without `.git`
@@ -70,6 +90,24 @@ export function renameRepoInUrl(url, oldName, newName) {
   if (!url) return url;
   const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return url.replace(new RegExp(`/${escaped}(\\.git)?$`), `/${newName}$1`);
+}
+
+/**
+ * Validate that NEW is a legal repo name that doesn't collide with existing
+ * entries or equal OLD. Throws a descriptive Error on failure.
+ *
+ * @param {string} newName
+ * @param {string} oldName
+ * @param {object} manifest - parsed household.json
+ */
+export function validateNewName(newName, oldName, manifest) {
+  if (!newName) throw new Error('NEW name is required.');
+  if (!/^[A-Za-z0-9._-]+$/.test(newName)) {
+    throw new Error(`"${newName}" is not a valid repo name (allowed: A-Z a-z 0-9 . _ -).`);
+  }
+  if (newName === oldName) throw new Error('OLD and NEW are identical.');
+  const collision = manifest.repos.find(r => r.name === newName);
+  if (collision) throw new Error(`household.json already has an entry named "${newName}".`);
 }
 
 /**
@@ -103,6 +141,11 @@ export function validateRename(manifest, oldName, newName) {
  * Entries without a `url` (inline directories, e.g. the knowledge base) get
  * only their `name` updated. If the renamed entry is the meta-repo or the
  * knowledge base, the top-level `meta_repo` / `knowledge_base` field follows.
+ *
+ * The url rewrite uses the CURRENT GitHub repo name (derived from the url via
+ * parseRemoteUrl), not the manifest name — so it works correctly even when the
+ * manifest name and the GitHub repo name differ.
+ *
  * Pure — does not mutate input.
  *
  * @param {object} manifest
@@ -116,7 +159,12 @@ export function applyRenameToManifest(manifest, oldName, newName) {
     if (r.name !== oldName) return r;
     const renamed = { ...r, name: newName };
     if (r.url) {
-      renamed.url = renameRepoInUrl(r.url, oldName, newName);
+      // Use the GitHub repo name from the url (not the manifest name) as the
+      // segment to replace — they may differ (e.g. manifest "file-extractor"
+      // pointing at github.com/org/File-Extract-API.git).
+      const parsed = parseRemoteUrl(r.url);
+      const currentGhRepo = parsed ? parsed.split('/')[1] : oldName;
+      renamed.url = renameRepoInUrl(r.url, currentGhRepo, newName);
     }
     return renamed;
   });
@@ -138,34 +186,58 @@ async function currentBranch(dir) {
   return stdout.trim();
 }
 
-async function confirm(question) {
+async function writeFileAtomic(filePath, content) {
+  const tmp = filePath + '.tmp';
+  await writeFile(tmp, content);
+  await fsRename(tmp, filePath);
+}
+
+async function promptLine(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question(question);
-    return /^y(es)?$/i.test(answer.trim());
+    return await rl.question(question);
   } finally {
     rl.close();
   }
+}
+
+async function confirm(question) {
+  return /^y(es)?$/i.test((await promptLine(question)).trim());
 }
 
 // === Main ======================================================================
 
 function help() {
   console.log(`Usage:
-  ./scripts/repo-rename.mjs OLD NEW                Full flow: GitHub rename + household.json + PR
+  ./scripts/repo-rename.mjs                    Interactive: pick a repo from a numbered list
+  ./scripts/repo-rename.mjs OLD NEW            Full flow: GitHub rename + household.json + PR
   ./scripts/repo-rename.mjs OLD NEW --no-github    Skip GH rename (already done manually)
   ./scripts/repo-rename.mjs OLD NEW --yes          Skip the confirmation prompt
+  ./scripts/repo-rename.mjs OLD NEW --rename-local  Also rename the local sibling folder
 
 What it does:
   1. Validate OLD exists in household.json, NEW doesn't conflict, working tree clean.
-  2. (unless --no-github) Rename on GitHub: gh repo edit <your GitHub org>/OLD --rename NEW
-     (org derived from the meta_repo entry's url in household.json; entries
-     without a url — inline directories — skip this step)
+  2. (unless --no-github) Rename on GitHub:
+       gh repo edit <org>/<current-github-repo> --rename NEW
+     The org and current GitHub repo name come from the entry's "url" in household.json,
+     so it works even when the manifest name differs from the GitHub repo name.
+     Entries without a url (inline directories) skip this step.
   3. Update household.json (entry's name + url; top-level meta_repo /
      knowledge_base if the renamed entry is the meta-repo / knowledge base).
   4. Create a branch (rename-OLD-to-NEW), commit, push, open PR via gh.
   5. After PR merges, teammates run \`git pull\` in the household meta-repo and
-     rename their local sibling dir + update its remote URL.
+     either:
+     - run \`make repos-sync-names-apply\` to reconcile their local sibling dirs, OR
+     - the folder was already renamed locally (--rename-local) and only the
+       PR merge + pull is needed.
+
+--rename-local: when set, also renames the local sibling folder and updates its
+  origin remote URL. Off by default — without it, teammates reconcile via
+  \`make repos-sync-names-apply\`.
+
+Interactive mode: when invoked with no OLD/NEW arguments and stdin is a TTY,
+  prints a numbered list of entries with a url, lets you pick one and type a new
+  name, then optionally renames the local folder.
 
 Requires \`gh\` for the GitHub rename and PR creation.
 
@@ -175,7 +247,7 @@ Example: ./scripts/repo-rename.mjs acme-foo acme-bar
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.includes('--help') || args.includes('-h') || args.length === 0) {
+  if (args.includes('--help') || args.includes('-h')) {
     help();
     return;
   }
@@ -183,16 +255,61 @@ async function main() {
   const positional = args.filter(a => !a.startsWith('--'));
   const noGithub = args.includes('--no-github');
   const yes = args.includes('--yes');
-
-  if (positional.length !== 2) {
-    console.error('Error: expected exactly 2 positional args (OLD NEW).');
-    help();
-    process.exit(2);
-  }
-  const [oldName, newName] = positional;
+  let renameLocal = args.includes('--rename-local');
 
   const raw = await readFile(WORKSPACE_JSON, 'utf8');
   const manifest = JSON.parse(raw);
+
+  let oldName, newName;
+
+  if (positional.length === 0) {
+    // Interactive mode — requires a TTY
+    if (!process.stdin.isTTY) {
+      console.error('Error: OLD and NEW required (stdin is not a TTY).');
+      console.error('Usage: ./scripts/repo-rename.mjs OLD NEW [--no-github] [--yes] [--rename-local]');
+      process.exit(2);
+    }
+
+    const renameable = manifest.repos.filter(r => r.url);
+    if (renameable.length === 0) {
+      console.error('No entries with a url in household.json (nothing to rename on GitHub).');
+      process.exit(1);
+    }
+
+    console.log('Repos available to rename:');
+    renameable.forEach((r, i) => {
+      const ghTarget = deriveGithubTarget(r);
+      const ghLabel = ghTarget ? ` → github: ${ghTarget.org}/${ghTarget.repo}` : '';
+      console.log(`  ${i + 1}. ${r.name}${ghLabel}`);
+    });
+
+    const pick = await promptLine('Pick a number: ');
+    const idx = parseInt(pick, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= renameable.length) {
+      console.error(`Invalid choice: "${pick}"`);
+      process.exit(1);
+    }
+    oldName = renameable[idx].name;
+    newName = await promptLine(`New name for "${oldName}": `);
+
+    try {
+      validateNewName(newName, oldName, manifest);
+    } catch (e) {
+      console.error(`Error: ${e.message}`);
+      process.exit(1);
+    }
+
+    if (!renameLocal) {
+      const ans = await promptLine(`Also rename the local folder '${oldName}' → '${newName}'? [y/N] `);
+      renameLocal = /^y(es)?$/i.test(ans.trim());
+    }
+  } else if (positional.length === 2) {
+    [oldName, newName] = positional;
+  } else {
+    console.error('Error: expected exactly 2 positional args (OLD NEW), or no positional args for interactive mode.');
+    help();
+    process.exit(2);
+  }
 
   let oldEntry;
   try {
@@ -202,19 +319,21 @@ async function main() {
     process.exit(1);
   }
 
-  const hasUrl = Boolean(oldEntry.url);
-
-  // Resolve the org at runtime, only when we actually need it for the GitHub
-  // rename (never at module top-level — tests import the pure functions).
-  let org = null;
-  if (!noGithub && hasUrl) {
+  // For non-interactive positional mode, also validate NEW name chars
+  if (positional.length === 2) {
     try {
-      org = resolveOrg(manifest);
+      validateNewName(newName, oldName, manifest);
     } catch (e) {
-      console.error(`Error: ${e.message}`);
-      process.exit(1);
+      // validateRename already caught duplicate/identical; only catch char-validation here
+      if (/valid repo name/.test(e.message)) {
+        console.error(`Error: ${e.message}`);
+        process.exit(1);
+      }
     }
   }
+
+  const hasUrl = Boolean(oldEntry.url);
+  const ghTarget = hasUrl ? deriveGithubTarget(oldEntry) : null;
 
   if (!(await isWorkingTreeClean(WORKSPACE))) {
     console.error('Error: household meta-repo has uncommitted changes. Commit or stash first.');
@@ -222,19 +341,30 @@ async function main() {
   }
 
   const branch = `rename-${oldName}-to-${newName}`;
-  const newUrl = hasUrl ? renameRepoInUrl(oldEntry.url, oldName, newName) : null;
+  const newUrl = hasUrl ? renameRepoInUrl(
+    oldEntry.url,
+    ghTarget ? ghTarget.repo : oldName,
+    newName,
+  ) : null;
 
   console.log(`About to rename: ${oldName} → ${newName}`);
   console.log(hasUrl
     ? `  Manifest entry: name="${newName}", url="${newUrl}"`
     : `  Manifest entry: name="${newName}" (no url — inline directory, name only)`);
-  console.log(`  GitHub: ${noGithub
-    ? 'SKIPPED (--no-github)'
-    : hasUrl
-      ? `gh repo edit ${org}/${oldName} --rename ${newName}`
-      : 'SKIPPED (entry has no url — nothing to rename on GitHub)'}`);
+  if (noGithub) {
+    console.log('  GitHub: SKIPPED (--no-github)');
+  } else if (!hasUrl) {
+    console.log('  GitHub: SKIPPED (entry has no url — nothing to rename on GitHub)');
+  } else if (ghTarget) {
+    console.log(`  GitHub: gh repo edit ${ghTarget.org}/${ghTarget.repo} --rename ${newName}`);
+  }
   console.log(`  Branch: ${branch}`);
   console.log(`  PR title: "rename: ${oldName} → ${newName}"`);
+  if (renameLocal) {
+    console.log(`  Local folder: will rename ${oldName} → ${newName} and update remote URL`);
+  } else {
+    console.log(`  Local folder: unchanged (teammates reconcile via make repos-sync-names-apply)`);
+  }
   console.log('');
 
   if (!yes) {
@@ -250,15 +380,37 @@ async function main() {
     console.log('[1/4] GitHub rename skipped (--no-github)');
   } else if (!hasUrl) {
     console.log(`[1/4] GitHub rename skipped ("${oldName}" has no url in household.json — inline directory)`);
-  } else {
-    console.log(`[1/4] gh repo edit ${org}/${oldName} --rename ${newName}`);
-    await execFileP('gh', ['repo', 'edit', `${org}/${oldName}`, '--rename', newName]);
+  } else if (ghTarget) {
+    console.log(`[1/4] gh repo edit ${ghTarget.org}/${ghTarget.repo} --rename ${newName}`);
+    await execFileP('gh', ['repo', 'edit', `${ghTarget.org}/${ghTarget.repo}`, '--rename', newName]);
   }
 
-  // 2. Update household.json
+  // 2. Update household.json (atomic write)
   console.log('[2/4] Updating household.json');
   const updated = applyRenameToManifest(manifest, oldName, newName);
-  await writeFile(WORKSPACE_JSON, formatRepos(updated));
+  await writeFileAtomic(WORKSPACE_JSON, formatRepos(updated));
+
+  // 2b. Optional local folder rename
+  if (renameLocal && hasUrl) {
+    const localOldPath = path.join(WORKSPACE, oldName);
+    let localExists = false;
+    try {
+      await stat(localOldPath);
+      localExists = true;
+    } catch { /* folder doesn't exist */ }
+
+    if (localExists) {
+      const localNewPath = path.join(WORKSPACE, newName);
+      await fsRename(localOldPath, localNewPath);
+      console.log(`  Renamed local folder: ${oldName} → ${newName}`);
+      if (newUrl) {
+        await execFileP('git', ['-C', localNewPath, 'remote', 'set-url', 'origin', newUrl]);
+        console.log(`  Updated remote URL: ${newUrl}`);
+      }
+    } else {
+      console.log(`  Note: local folder "${oldName}" not found — skipping folder rename.`);
+    }
+  }
 
   // 3. Branch + commit + push
   const cur = await currentBranch(WORKSPACE);
@@ -273,12 +425,20 @@ async function main() {
 
   // 4. Open PR
   console.log('[4/4] Opening PR');
-  const body = `Renames \`${oldName}\` → \`${newName}\`.\n\n` +
+  const ghRename = ghTarget
+    ? `GitHub repo \`${ghTarget.org}/${ghTarget.repo}\` renamed to \`${ghTarget.org}/${newName}\` via \`gh repo edit\` (handled by \`repo-rename.mjs\`).`
+    : '';
+  const localNote = renameLocal
+    ? `Local folder \`${oldName}\` was renamed to \`${newName}\` and its remote URL updated on this machine.`
+    : `Local folder was NOT renamed — teammates (and this machine) should run \`make repos-sync-names-apply\` to reconcile.`;
+
+  const body = `Renames \`${oldName}\` → \`${newName}\` in household.json.\n\n` +
     (noGithub
       ? `GitHub rename was done separately (\`--no-github\` flag).\n\n`
-      : hasUrl
-        ? `GitHub repo already renamed via \`gh repo edit ${org}/${oldName} --rename ${newName}\` (handled by \`repo-rename.mjs\`).\n\n`
+      : hasUrl && ghTarget
+        ? `${ghRename}\n\n`
         : `No GitHub rename needed — \`${oldName}\` is an inline directory (no \`url\` in household.json).\n\n`) +
+    `${localNote}\n\n` +
     `**Teammates after merge:**\n` +
     `1. \`git pull\` in the household meta-repo.\n` +
     (hasUrl
