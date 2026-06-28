@@ -31,12 +31,8 @@ status:  ## One-line git status per sibling
 new-repo: ## Publish current repo to your org + register in household.json (NAME= DESCRIPTION= [TAGS=])
 	@./scripts/new-repo.mjs --name="$(NAME)" --description="$(DESCRIPTION)" --tags="$(TAGS)"
 
-repo-rename: ## Rename a repo end-to-end: GitHub + household.json + PR (OLD= NEW=)
-	@if [ -z "$(OLD)" ] || [ -z "$(NEW)" ]; then \
-		echo "Usage: make repo-rename OLD=<old-name> NEW=<new-name>"; \
-		exit 1; \
-	fi
-	@./scripts/repo-rename.mjs $(OLD) $(NEW)
+repo-rename: ## Rename a repo end-to-end: GitHub + household.json + PR. No args = interactive picker; or OLD= NEW= [LOCAL=1]
+	@./scripts/repo-rename.mjs $(OLD) $(NEW) $(if $(LOCAL),--rename-local)
 
 repos-sync-names: ## Dry-run: sync local sibling dirs + remote URLs with household.json
 	@./scripts/repos-sync-names.mjs
