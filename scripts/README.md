@@ -8,16 +8,70 @@ knowledge base supports via `make split-lore`.
 ## Contents
 
 - Bash + Node `.mjs` scripts: `setup.sh`, `pull-all.sh`, `status-all.sh`,
-  `rename.sh`, `split-lore.sh`, `new-repo.mjs`, `repo-rename.mjs`,
-  `repos-sync-names.mjs`, `repo-policy.mjs`. All stdlib-only — no
-  `npm install` required.
+  `update-kb.sh`, `rename.sh`, `split-lore.sh`, `new-repo.mjs`,
+  `repo-rename.mjs`, `repos-sync-names.mjs`, `repo-policy.mjs`.
+  All stdlib-only — no `npm install` required.
 - `Makefile.shared` — the shared make targets (`setup`, `pull`, `status`,
-  `new-repo`, `repo-rename`, `repos-sync-names`, `policy-*`, `test-scripts`).
-  The root `Makefile` does `include scripts/Makefile.shared` and adds the
-  household-specific targets (`split-lore`, `rename`, lore tooling).
+  `update-kb`, `new-repo`, `repo-rename`, `repos-sync-names`, `policy-*`,
+  `test-scripts`). The root `Makefile` does `include scripts/Makefile.shared`
+  and adds household-specific targets (`split-lore`, `rename`, lore tooling).
 - `claude-settings.json` — canonical Claude Code baseline. `setup.sh` copies
   it to the workspace root's `.claude/settings.json` on every run; that copy
   is generated, not tracked.
+
+## `repo-rename.mjs` — end-to-end repo rename
+
+Renames a single repo: GitHub rename, `household.json` update (atomic write),
+branch + PR.
+
+**Interactive mode** (no OLD/NEW args, stdin is a TTY):
+
+```
+make repo-rename
+# or
+./scripts/repo-rename.mjs
+```
+
+Prints a numbered list of renameable repos (those with a `url`), showing the
+real GitHub repo name alongside the manifest name:
+
+```
+Repos available to rename:
+  1. my-household → github: acme-org/my-household
+  2. file-extractor → github: acme-org/File-Extract-API
+Pick a number: 2
+New name for "file-extractor": file-extractor-v2
+Also rename the local folder 'file-extractor' → 'file-extractor-v2'? [y/N]
+```
+
+**Non-interactive mode** (positional args):
+
+```
+make repo-rename OLD=file-extractor NEW=file-extractor-v2
+# or
+./scripts/repo-rename.mjs file-extractor file-extractor-v2 [--no-github] [--yes] [--rename-local]
+```
+
+**Manifest name vs GitHub repo name:** the GitHub rename targets the real
+repo name from the entry's `url` (`gh repo edit acme-org/File-Extract-API
+--rename file-extractor-v2`), not the manifest name — so it works correctly
+even when they differ.
+
+**`--rename-local`:** also renames the local sibling folder and updates its
+`origin` remote URL. Off by default — without it, teammates reconcile via
+`make repos-sync-names-apply` after pulling.
+
+## `update-kb.sh` — pull stale knowledge bases
+
+```
+make update-kb
+```
+
+Fast-forward pulls every KB declared in `household.json`
+(`shared_knowledge_bases` + `knowledge_base`). The Lorekeeper SessionStart
+hook tells the agent to prompt users with `make update-kb` when KBs are stale.
+Uses ff-only safety: only pulls on a clean `main`; fetches all KBs regardless
+of per-KB failures.
 
 ## Conventions
 
@@ -25,6 +79,8 @@ knowledge base supports via `make split-lore`.
   `meta_repo` entry's `url` (`github.com/<org>/<repo>`).
 - Manifest entries without a `url` are inline directories (e.g. `lore/`) —
   every script skips them where a real GitHub repo is required.
+- Manifest name need not equal the GitHub repo name: `repo-rename.mjs` and
+  `repos-sync-names.mjs` derive the real GitHub name from the entry's `url`.
 - Bash: `#!/bin/bash`, `set -euo pipefail`, script-relative paths via
   `SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`.
 - Node: `.mjs` ESM, `node:` import prefix on stdlib, no external deps,
