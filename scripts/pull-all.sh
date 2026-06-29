@@ -28,7 +28,12 @@ pull_one() { # $1=label $2=dir
         return
     fi
     echo "[FETCH] $name"
-    git -C "$DIR" fetch --prune --quiet
+    # Don't let one repo's fetch failure (network/auth) abort the whole run under
+    # `set -e` — report it and move on so the remaining repos still get processed.
+    if ! git -C "$DIR" fetch --prune --quiet; then
+        echo "  fetch failed (network/auth?); skipping"
+        return
+    fi
     BRANCH=$(git -C "$DIR" symbolic-ref --short HEAD 2>/dev/null || echo "")
     if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
         if [ -z "$(git -C "$DIR" status --porcelain)" ]; then
