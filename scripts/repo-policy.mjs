@@ -47,6 +47,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import * as readline from 'node:readline/promises';
 import path from 'node:path';
+import { parseRemoteUrl } from './repos-sync-names.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -110,6 +111,26 @@ export function resolveOrg(manifest) {
   const m = /github\.com[:/]([^/]+)\//.exec(self?.url || '');
   if (!m) throw new Error('Cannot resolve GitHub org: household.json needs a meta_repo entry whose "url" points at github.com/<org>/<repo>.');
   return m[1];
+}
+
+/**
+ * Derive the GitHub { org, repo } for a manifest entry from its `url`.
+ *
+ * Returns null when:
+ *   - the entry has no `url` (inline directory), or
+ *   - the url is not a recognisable github.com SSH/HTTPS remote.
+ *
+ * Mirrors `deriveGithubTarget` in repo-rename.mjs without cross-importing it;
+ * both delegate to the shared `parseRemoteUrl` from repos-sync-names.mjs.
+ *
+ * @param {{ url?: string }} repo - a manifest repos[] entry
+ * @returns {{ org: string, repo: string } | null}
+ */
+export function githubTargetFor(repoEntry) {
+  const parsed = parseRemoteUrl(repoEntry?.url);
+  if (!parsed) return null;
+  const slash = parsed.indexOf('/');
+  return { org: parsed.slice(0, slash), repo: parsed.slice(slash + 1) };
 }
 
 /**
@@ -502,28 +523,39 @@ async function cmdAudit({ write }) {
   const teamsPromise = listOrgTeams(org);
 
   // Entries without a url are inline directories (no GitHub repo) — skip them.
+  // Entries whose url can't be parsed as a GitHub remote are also skipped with
+  // a clear diagnostic (no silent fallback to manifest name).
   const ghRepos = manifest.repos.filter(repo => {
-    if (repo.url) return true;
-    console.error(`[skip] ${repo.name} (inline, no GitHub repo)`);
-    return false;
+    if (!repo.url) {
+      console.error(`[skip] ${repo.name} (inline, no GitHub repo)`);
+      return false;
+    }
+    if (!githubTargetFor(repo)) {
+      console.error(`[skip] ${repo.name}: cannot parse GitHub org/repo from url "${repo.url}"`);
+      return false;
+    }
+    return true;
   });
 
   // Audit every repo in parallel. Within each repo, run listRulesets and
   // getClassicProtection concurrently, then fan out getRulesetDetail across
   // active rulesets.
   const results = await Promise.all(ghRepos.map(async (repo) => {
+    const { org: ghOrg, repo: ghRepo } = githubTargetFor(repo);
     const [list, classic, repoMeta] = await Promise.all([
-      listRulesets(org, repo.name),
-      getClassicProtection(org, repo.name),
-      getRepoMeta(org, repo.name),
+      listRulesets(ghOrg, ghRepo),
+      getClassicProtection(ghOrg, ghRepo),
+      getRepoMeta(ghOrg, ghRepo),
     ]);
     const details = await Promise.all(
       list.filter(r => r.enforcement === 'active')
-          .map(r => getRulesetDetail(org, repo.name, r.id))
+          .map(r => getRulesetDetail(ghOrg, ghRepo, r.id))
     );
     const summary = summarizeState(details, classic, repoMeta);
     return {
       repo,
+      ghOrg,
+      ghRepo,
       activeCount: details.length,
       inactiveCount: list.length - details.length,
       ...summary,
@@ -547,7 +579,11 @@ async function cmdAudit({ write }) {
     const co = tribool(r.codeOwnerReview);
     const bypassStr = formatBypassActors(r.bypassActors, teamSlugById);
     const delOnMerge = tribool(r.deleteBranchOnMerge);
-    console.log(`| ${r.repo.name} | ${r.state} | ${count} | ${reviews} | ${squash} | ${threads} | ${co} | ${bypassStr} | ${sc} | ${delOnMerge} |`);
+    // Show GitHub repo name in parentheses when it differs from the manifest name
+    const displayName = r.ghRepo && r.ghRepo !== r.repo.name
+      ? `${r.repo.name} (${r.ghOrg}/${r.ghRepo})`
+      : r.repo.name;
+    console.log(`| ${displayName} | ${r.state} | ${count} | ${reviews} | ${squash} | ${threads} | ${co} | ${bypassStr} | ${sc} | ${delOnMerge} |`);
   }
 
   if (write) {
@@ -612,9 +648,16 @@ async function cmdApply(repoName, { dryRun, yes }) {
     console.log(`[skip] ${repo.name} (inline, no GitHub repo)`);
     return;
   }
-  const org = resolveOrg(manifest);
+  const ghTarget = githubTargetFor(repo);
+  if (!ghTarget) {
+    console.error(`apply: ${repo.name}: cannot parse GitHub org/repo from url "${repo.url}"`);
+    process.exit(1);
+  }
+  const { org: ghOrg, repo: ghRepo } = ghTarget;
 
-  const bypass = await resolveBypassTeam(org, manifest);
+  // Resolve bypass team using the household org (bypass team is org-scoped)
+  const householdOrg = resolveOrg(manifest);
+  const bypass = await resolveBypassTeam(householdOrg, manifest);
   if (bypass && !bypass.cached) {
     console.error('(note: bypass team id not cached in household.json — run `audit --write` to persist)');
   }
@@ -623,11 +666,11 @@ async function cmdApply(repoName, { dryRun, yes }) {
 
   // Fetch existing ruleset + repo meta in parallel
   const [list, repoMeta] = await Promise.all([
-    listRulesets(org, repo.name),
-    getRepoMeta(org, repo.name),
+    listRulesets(ghOrg, ghRepo),
+    getRepoMeta(ghOrg, ghRepo),
   ]);
   const match = list.find(r => r.name === RULESET_NAME);
-  const existing = match ? await getRulesetDetail(org, repo.name, match.id) : null;
+  const existing = match ? await getRulesetDetail(ghOrg, ghRepo, match.id) : null;
 
   const rulesetDiffs = diffRulesets(existing, desired);
   const metaDiffs = diffRepoMeta(repoMeta);
@@ -671,11 +714,11 @@ async function cmdApply(repoName, { dryRun, yes }) {
   }
 
   if (rulesetDiffs.length > 0) {
-    if (match) await putRuleset(org, repo.name, match.id, desired);
-    else await postRuleset(org, repo.name, desired);
+    if (match) await putRuleset(ghOrg, ghRepo, match.id, desired);
+    else await postRuleset(ghOrg, ghRepo, desired);
   }
   if (metaDiffs.length > 0) {
-    await patchRepoMeta(org, repo.name, STANDARD_REPO_META);
+    await patchRepoMeta(ghOrg, ghRepo, STANDARD_REPO_META);
   }
   console.log(`${repo.name}: applied`);
 }

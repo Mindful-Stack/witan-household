@@ -11,6 +11,7 @@ import {
   formatBypassActor,
   formatBypassActors,
   resolveBypassTeamFromManifest,
+  githubTargetFor,
 } from './repo-policy.mjs';
 
 // === resolveOrg ===
@@ -502,6 +503,46 @@ describe('formatRepos', () => {
   it('preserves escaped quotes inside string values', () => {
     const out = formatRepos({ repos: [{ tags: ['has "quote"', 'plain'] }] });
     assert.match(out, /"tags": \["has \\"quote\\"", "plain"\]/);
+  });
+});
+
+// === githubTargetFor ===
+
+describe('githubTargetFor', () => {
+  it('parses an SSH url with .git', () => {
+    const t = githubTargetFor({ url: 'git@github.com:Grantigo/File-Extract-API.git' });
+    assert.deepEqual(t, { org: 'Grantigo', repo: 'File-Extract-API' });
+  });
+
+  it('parses an SSH url without .git', () => {
+    const t = githubTargetFor({ url: 'git@github.com:acme/my-repo' });
+    assert.deepEqual(t, { org: 'acme', repo: 'my-repo' });
+  });
+
+  it('parses an HTTPS url with .git', () => {
+    const t = githubTargetFor({ url: 'https://github.com/acme/my-repo.git' });
+    assert.deepEqual(t, { org: 'acme', repo: 'my-repo' });
+  });
+
+  it('parses an HTTPS url without .git', () => {
+    const t = githubTargetFor({ url: 'https://github.com/acme/my-repo' });
+    assert.deepEqual(t, { org: 'acme', repo: 'my-repo' });
+  });
+
+  it('handles a repo name that differs from the manifest name (File-Extract-API)', () => {
+    const t = githubTargetFor({ name: 'file-extractor', url: 'git@github.com:Grantigo/File-Extract-API.git' });
+    assert.deepEqual(t, { org: 'Grantigo', repo: 'File-Extract-API' });
+  });
+
+  it('returns null when there is no url', () => {
+    assert.equal(githubTargetFor({ name: 'inline-dir' }), null);
+    assert.equal(githubTargetFor({}), null);
+    assert.equal(githubTargetFor(null), null);
+  });
+
+  it('returns null for a non-GitHub url (GitLab, Bitbucket, etc.)', () => {
+    assert.equal(githubTargetFor({ url: 'git@gitlab.com:acme/my-repo.git' }), null);
+    assert.equal(githubTargetFor({ url: 'https://bitbucket.org/acme/my-repo.git' }), null);
   });
 });
 
