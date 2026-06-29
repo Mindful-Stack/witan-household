@@ -22,10 +22,10 @@ setup-core: ## Clone 'core'-tagged repos non-interactively
 setup-all: ## Clone every repo declared in household.json
 	@./scripts/setup.sh --all
 
-pull:    ## Fetch all siblings; ff-pull if on clean main
+pull:    ## Fetch the meta-repo + every sibling; ff-pull each that's on a clean main
 	@./scripts/pull-all.sh
 
-status:  ## One-line git status per sibling
+status:  ## One-line git status for the meta-repo + every sibling
 	@./scripts/status-all.sh
 
 new-repo: ## Publish current repo to your org + register in household.json (NAME= DESCRIPTION= [TAGS=])
