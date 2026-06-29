@@ -10,20 +10,30 @@ if [ ! -f "$MANIFEST" ]; then
     exit 1
 fi
 
-# List non-workspace repo names from manifest.
+# The meta-repo IS the workspace root ($WORKSPACE), not a sibling subdirectory,
+# so it's resolved separately and pulled first. Siblings are every other entry.
+META=$(node -e "const m = require('$MANIFEST'); process.stdout.write(m.meta_repo || '')")
 SIBLINGS=$(node -e "
     const m = require('$MANIFEST');
     m.repos.filter(r => r.name !== m.meta_repo).forEach(r => console.log(r.name));
 ")
 
-for name in $SIBLINGS; do
-    DIR="$WORKSPACE/$name"
+# Fetch a repo; fast-forward pull only when on a clean main/master. A repo on a
+# feature branch (e.g. the workspace meta-repo while you're mid-change) is fetched
+# but left exactly where it is — never auto-pulled out from under you.
+pull_one() { # $1=label $2=dir
+    local name="$1" DIR="$2" BRANCH
     if [ ! -d "$DIR/.git" ]; then
         echo "[SKIP] $name (no .git/)"
-        continue
+        return
     fi
     echo "[FETCH] $name"
-    git -C "$DIR" fetch --prune --quiet
+    # Don't let one repo's fetch failure (network/auth) abort the whole run under
+    # `set -e` — report it and move on so the remaining repos still get processed.
+    if ! git -C "$DIR" fetch --prune --quiet; then
+        echo "  fetch failed (network/auth?); skipping"
+        return
+    fi
     BRANCH=$(git -C "$DIR" symbolic-ref --short HEAD 2>/dev/null || echo "")
     if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
         if [ -z "$(git -C "$DIR" status --porcelain)" ]; then
@@ -34,4 +44,10 @@ for name in $SIBLINGS; do
     else
         echo "  on '$BRANCH'; not pulling"
     fi
+}
+
+# Meta-repo (the workspace root) first, then siblings.
+[ -n "$META" ] && pull_one "$META (meta)" "$WORKSPACE"
+for name in $SIBLINGS; do
+    pull_one "$name" "$WORKSPACE/$name"
 done
