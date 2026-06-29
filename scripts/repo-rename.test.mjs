@@ -76,6 +76,20 @@ describe('validateNewName', () => {
     assert.throws(() => validateNewName('acme-foo', 'acme-foo', manifest), /identical/);
   });
 
+  it('allows new name equal to old name when allowSameName is set (converge case)', () => {
+    // Converge: manifest name is already the target; only GitHub/url needs to
+    // catch up. The same name must be accepted, and must NOT be treated as a
+    // self-collision.
+    validateNewName('file-extractor', 'file-extractor', manifestMismatch, { allowSameName: true });
+  });
+
+  it('still rejects invalid chars even when allowSameName is set', () => {
+    assert.throws(
+      () => validateNewName('acme foo', 'acme foo', manifest, { allowSameName: true }),
+      /valid repo name/,
+    );
+  });
+
   it('rejects new name that collides with an existing manifest entry', () => {
     assert.throws(() => validateNewName('acme-bar', 'acme-foo', manifest), /already has an entry/);
   });
@@ -241,6 +255,24 @@ describe('applyRenameToManifest with mismatched name/github-repo', () => {
     const original = JSON.parse(JSON.stringify(manifestMismatch));
     applyRenameToManifest(manifestMismatch, 'file-extractor', 'file-extractor-v2');
     assert.deepEqual(manifestMismatch, original);
+  });
+
+  it('converge: when OLD === NEW, keeps the name but rewrites the url to match the manifest name', () => {
+    // grantigo scenario: manifest name "file-extractor", github repo
+    // "File-Extract-API". Caller wants github (and url) to converge on the
+    // existing manifest name. OLD === NEW must be allowed and rewrite the url's
+    // repo segment from the github name to the manifest name.
+    const updated = applyRenameToManifest(manifestMismatch, 'file-extractor', 'file-extractor');
+    const entry = updated.repos.find(r => r.name === 'file-extractor');
+    assert.ok(entry, 'entry keeps its name');
+    assert.equal(entry.url, 'git@github.com:acme-org/file-extractor.git');
+  });
+
+  it('converge: does not duplicate or drop the entry when OLD === NEW', () => {
+    const updated = applyRenameToManifest(manifestMismatch, 'file-extractor', 'file-extractor');
+    const matches = updated.repos.filter(r => r.name === 'file-extractor');
+    assert.equal(matches.length, 1);
+    assert.equal(updated.repos.length, manifestMismatch.repos.length);
   });
 });
 

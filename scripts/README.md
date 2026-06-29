@@ -53,13 +53,21 @@ make repo-rename OLD=file-extractor NEW=file-extractor-v2
 ```
 
 **Manifest name vs GitHub repo name:** the GitHub rename targets the real
-repo name from the entry's `url` (`gh repo edit acme-org/File-Extract-API
---rename file-extractor-v2`), not the manifest name — so it works correctly
+repo name from the entry's `url` (`gh repo rename file-extractor-v2 --repo
+acme-org/File-Extract-API`), not the manifest name — so it works correctly
 even when they differ.
 
+**Converge (`OLD === NEW`):** when the manifest name is already what you want
+the GitHub repo called but the GitHub repo still has its old name, pass the
+same name (`make repo-rename OLD=portal NEW=portal`, or just press Enter in the
+interactive picker). This renames the GitHub repo + url to match the manifest
+name without changing the name. Passing identical names when nothing diverges
+is rejected as a no-op.
+
 **`--rename-local`:** also renames the local sibling folder and updates its
-`origin` remote URL. Off by default — without it, teammates reconcile via
-`make repos-sync-names-apply` after pulling.
+`origin` remote URL (in the converge case, only the remote URL is updated —
+the folder name already matches). Off by default — without it, teammates
+reconcile via `make repos-sync-names-apply` after pulling.
 
 ## `update-kb.sh` — pull stale knowledge bases
 
