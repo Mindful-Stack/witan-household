@@ -498,6 +498,7 @@ async function main() {
   // 2b. Optional local folder rename
   // Fix 3: track actual outcome (not just the request) for accurate PR body
   let localRenamed = false;
+  let localUrlUpdated = false;
   if (renameLocal && !hasUrl) {
     console.log(`  Note: --rename-local ignored — "${oldName}" is an inline directory (no url; not a separate git repo).`);
   } else if (renameLocal && hasUrl) {
@@ -520,6 +521,7 @@ async function main() {
       }
       if (newUrl && urlNeedsRewrite) {
         await execFileP('git', ['-C', finalPath, 'remote', 'set-url', 'origin', newUrl]);
+        localUrlUpdated = true;
         console.log(`  Updated remote URL: ${newUrl}`);
       }
     } else {
@@ -545,7 +547,7 @@ async function main() {
     : '';
   const localNote = localRenamed
     ? `Local folder \`${oldName}\` was renamed to \`${newName}\` and its remote URL updated on this machine.`
-    : renameLocal && urlNeedsRewrite
+    : localUrlUpdated
       ? `Local clone's remote URL was updated to the renamed GitHub repo on this machine.`
       : `Local folder was NOT renamed — teammates (and this machine) should run \`make repos-sync-names-apply\` to reconcile.`;
 
