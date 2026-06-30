@@ -1,18 +1,18 @@
 # Shared household make targets, consumed via `include scripts/Makefile.shared`
-# from the workspace root. Every target carries a `## comment` so the root
-# Makefile's grep-based `make help` lists shared and household-specific
-# targets alike. Recipes use ./scripts/ paths, resolved from the consumer's
-# working directory.
+# from the workspace root. Every target carries a `## comment`, and `##@ Group`
+# lines define the section headers that the root Makefile's `make help` prints.
+# Recipes use ./scripts/ paths, resolved from the consumer's working directory.
 #
 # This file is structured so scripts/ can later be split into its own repo
 # and mounted back as a git submodule without changing the consumer-side
 # Makefile.
 
 .PHONY: setup setup-core setup-all pull status \
-        new-repo repo-rename repos-sync-names repos-sync-names-apply \
+        repos-create repos-rename repos-sync-names repos-sync-names-apply \
         policy-audit policy-audit-write policy-apply policy-help \
         update-kb test-scripts
 
+##@ Setup
 setup:   ## Interactive: pick sibling repos to clone (Enter = core)
 	@./scripts/setup.sh
 
@@ -22,16 +22,17 @@ setup-core: ## Clone 'core'-tagged repos non-interactively
 setup-all: ## Clone every repo declared in household.json
 	@./scripts/setup.sh --all
 
+##@ Repos
 pull:    ## Fetch the meta-repo + every sibling; ff-pull each that's on a clean main
 	@./scripts/pull-all.sh
 
 status:  ## One-line git status for the meta-repo + every sibling
 	@./scripts/status-all.sh
 
-new-repo: ## Publish current repo to your org + register in household.json (NAME= DESCRIPTION= [TAGS=])
+repos-create: ## Publish current repo to your org + register in household.json (NAME= DESCRIPTION= [TAGS=])
 	@./scripts/new-repo.mjs --name="$(NAME)" --description="$(DESCRIPTION)" --tags="$(TAGS)"
 
-repo-rename: ## Rename a repo end-to-end: GitHub + household.json + PR. No args = interactive picker; or OLD= NEW= [LOCAL=1]
+repos-rename: ## Rename a repo end-to-end: GitHub + household.json + PR. No args = interactive picker; or OLD= NEW= [LOCAL=1]
 	@./scripts/repo-rename.mjs $(OLD) $(NEW) $(if $(LOCAL),--rename-local)
 
 repos-sync-names: ## Dry-run: sync local sibling dirs + remote URLs with household.json
@@ -40,6 +41,7 @@ repos-sync-names: ## Dry-run: sync local sibling dirs + remote URLs with househo
 repos-sync-names-apply: ## Execute the renames / URL updates (interactive confirm)
 	@./scripts/repos-sync-names.mjs --apply
 
+##@ Policy
 policy-audit: ## Read-only branch-protection drift table across every repo
 	@./scripts/repo-policy.mjs audit
 
@@ -52,6 +54,7 @@ policy-apply: ## Apply the standard branch-protection policy (REPO=<name>)
 policy-help: ## Show repo-policy.mjs full --help
 	@./scripts/repo-policy.mjs help
 
+##@ Maintenance
 update-kb: ## Pull every knowledge-base repo listed in household.json (ff-only, clean main)
 	@./scripts/update-kb.sh
 

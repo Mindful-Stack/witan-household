@@ -32,7 +32,7 @@ my-workspace/                       ← this directory (the meta-repo)
 
 - `make setup` / `setup-core` / `setup-all` — clone siblings declared in `household.json`.
 - `make status` / `make pull` — cross-repo git status / fetch+ff-pull.
-- `make new-repo`, `make repo-rename OLD= NEW=`, `make repos-sync-names[-apply]` — repo lifecycle; they keep `household.json` in sync and derive the GitHub org from the `meta_repo` entry's `url`.
+- `make repos-create`, `make repos-rename OLD= NEW=`, `make repos-sync-names[-apply]` — repo lifecycle; they keep `household.json` in sync and derive the GitHub org from the `meta_repo` entry's `url`.
 - `make policy-audit` / `policy-apply REPO=` — branch-protection drift check / apply.
 - `make test` — workspace scripts + manifest checks + lore tooling tests.
 
