@@ -4,6 +4,10 @@
 # (default: lore). This lets a household rename its knowledge base without
 # editing this Makefile — the build-index/validate/doctor/test targets follow.
 KB_DIR := $(shell node -e "try{process.stdout.write(String(require('./household.json').knowledge_base||'lore'))}catch(e){process.stdout.write('lore')}" 2>/dev/null)
+# Guard the empty case (e.g. node absent → stdout empty) so paths never become /_tools/...
+ifeq ($(strip $(KB_DIR)),)
+KB_DIR := lore
+endif
 
 ##@ General
 help:    ## List targets, grouped by section
