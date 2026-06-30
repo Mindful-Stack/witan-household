@@ -179,14 +179,14 @@ git clone <your-household-repo-url> .witan-tmp
 
 | Command | What it does |
 |---------|--------------|
-| `make new-repo NAME=foo DESCRIPTION="..." [TAGS=t1,t2]` | Publish the current local repo to your GitHub org and register it in `household.json` (run with no vars for interactive mode) |
-| `make repo-rename OLD=foo NEW=bar` | Rename a repo end-to-end: GitHub rename + `household.json` update + opens a PR |
+| `make repos-create NAME=foo DESCRIPTION="..." [TAGS=t1,t2]` | Publish the current local repo to your GitHub org and register it in `household.json` (run with no vars for interactive mode) |
+| `make repos-rename OLD=foo NEW=bar` | Rename a repo end-to-end: GitHub rename + `household.json` update + opens a PR |
 | `make repos-sync-names` | Dry-run: sync local sibling dir names + remote URLs **to match** `household.json` — run after a rename PR merges to catch up |
 | `make repos-sync-names-apply` | Execute the renames + URL updates (interactive confirm) |
 | `make policy-audit` | Read-only drift check of branch protection across every repo (markdown table) |
 | `make policy-apply REPO=foo` | Apply the standard branch-protection policy to one repo (idempotent) |
 | `make policy-audit-write` | Audit + persist current state to `household.json` (bootstrap only — typically run once) |
-| `make test` | All unit tests: workspace scripts, manifest shape checks (`household-tests/`), lore tooling |
+| `make test` | All unit tests: workspace scripts, manifest shape checks (`household-tests/`), KB tooling |
 
 The GitHub org for all of these is derived from the `meta_repo` entry's `url` in `household.json`. Entries without a `url` (inline directories like `lore/`) are skipped wherever a real GitHub repo is required. Auth uses whatever `gh auth status` reports.
 
@@ -213,7 +213,7 @@ The GitHub org for all of these is derived from the `meta_repo` entry's `url` in
 When a sibling repo needs a new name, do it once at the source and let teammates reconcile automatically — `household.json` is the single source of truth for repo names.
 
 ```sh
-make repo-rename OLD=old-name NEW=new-name
+make repos-rename OLD=old-name NEW=new-name
 ```
 
 This renames the repo on GitHub (org read from the entry's own `url`), updates the matching `household.json` entry's `name` and `url`, then branches, commits, and opens a PR. Pass `--no-github` (e.g. `node ./scripts/repo-rename.mjs old new --no-github`) if you already renamed it on GitHub by hand.

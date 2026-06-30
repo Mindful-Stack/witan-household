@@ -340,7 +340,7 @@ async function main() {
     return;
   }
 
-  // Treat empty strings (from `make new-repo` with unset vars) as missing.
+  // Treat empty strings (from `make repos-create` with unset vars) as missing.
   for (const k of ['name', 'description', 'tags']) {
     if (opts[k] === '') delete opts[k];
   }

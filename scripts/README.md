@@ -12,9 +12,9 @@ knowledge base supports via `make split-lore`.
   `repo-rename.mjs`, `repos-sync-names.mjs`, `repo-policy.mjs`.
   All stdlib-only — no `npm install` required.
 - `Makefile.shared` — the shared make targets (`setup`, `pull`, `status`,
-  `update-kb`, `new-repo`, `repo-rename`, `repos-sync-names`, `policy-*`,
+  `update-kb`, `repos-create`, `repos-rename`, `repos-sync-names`, `policy-*`,
   `test-scripts`). The root `Makefile` does `include scripts/Makefile.shared`
-  and adds household-specific targets (`split-lore`, `rename`, lore tooling).
+  and adds household-specific targets (`split-lore`, `rename`, KB tooling).
 - `claude-settings.json` — canonical Claude Code baseline. `setup.sh` copies
   it to the workspace root's `.claude/settings.json` on every run; that copy
   is generated, not tracked.
@@ -27,7 +27,7 @@ branch + PR.
 **Interactive mode** (no OLD/NEW args, stdin is a TTY):
 
 ```
-make repo-rename
+make repos-rename
 # or
 ./scripts/repo-rename.mjs
 ```
@@ -47,7 +47,7 @@ Also rename the local folder 'file-extractor' → 'file-extractor-v2'? [y/N]
 **Non-interactive mode** (positional args):
 
 ```
-make repo-rename OLD=file-extractor NEW=file-extractor-v2
+make repos-rename OLD=file-extractor NEW=file-extractor-v2
 # or
 ./scripts/repo-rename.mjs file-extractor file-extractor-v2 [--no-github] [--yes] [--rename-local]
 ```
@@ -59,7 +59,7 @@ even when they differ.
 
 **Converge (`OLD === NEW`):** when the manifest name is already what you want
 the GitHub repo called but the GitHub repo still has its old name, pass the
-same name (`make repo-rename OLD=portal NEW=portal`, or just press Enter in the
+same name (`make repos-rename OLD=portal NEW=portal`, or just press Enter in the
 interactive picker). This renames the GitHub repo + url to match the manifest
 name without changing the name. Passing identical names when nothing diverges
 is rejected as a no-op.
