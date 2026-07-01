@@ -665,6 +665,14 @@ async function cmdAudit({ write }) {
           .map(r => getRulesetDetail(ghOrg, ghRepo, r.id))
     );
     const summary = summarizeState(details, classic, repoMeta);
+    // Team access (per-repo-org). Degrade to an error marker so one repo's
+    // failure doesn't reject the whole audit.
+    let teamAccessActual = null, teamAccessError = null;
+    try {
+      teamAccessActual = await listRepoTeams(ghOrg, ghRepo);
+    } catch (e) {
+      teamAccessError = e.message;
+    }
     return {
       repo,
       ghOrg,
@@ -672,6 +680,8 @@ async function cmdAudit({ write }) {
       activeCount: details.length,
       inactiveCount: list.length - details.length,
       ...summary,
+      teamAccessActual,
+      teamAccessError,
     };
   }));
 
@@ -699,6 +709,26 @@ async function cmdAudit({ write }) {
     console.log(`| ${displayName} | ${r.state} | ${count} | ${reviews} | ${squash} | ${threads} | ${co} | ${bypassStr} | ${sc} | ${delOnMerge} |`);
   }
 
+  // Team-access drift table.
+  console.log('\n## Team access');
+  console.log('| Repo | Teams on GitHub | Drift vs manifest |');
+  console.log('| --- | --- | --- |');
+  for (const r of results) {
+    const managed = 'teamAccess' in r.repo;
+    let teams, drift;
+    if (r.teamAccessError) {
+      teams = '⚠ error';
+      drift = `⚠ ${r.teamAccessError}`;
+    } else {
+      teams = formatTeamAccessActual(r.teamAccessActual);
+      const diff = diffTeamAccess(managed ? r.repo.teamAccess : {}, r.teamAccessActual);
+      drift = formatTeamAccessDrift(diff, { managed });
+    }
+    const displayName = r.ghRepo && r.ghRepo !== r.repo.name
+      ? `${r.repo.name} (${r.ghOrg}/${r.ghRepo})` : r.repo.name;
+    console.log(`| ${displayName} | ${teams} | ${drift} |`);
+  }
+
   if (write) {
     // Persist bypass team id if a slug is configured but the id wasn't cached.
     if (bypass && !bypass.cached) {
@@ -711,6 +741,10 @@ async function cmdAudit({ write }) {
       else if (!('requiredStatusCheck' in r.repo.branchProtection)) {
         r.repo.branchProtection.requiredStatusCheck = null;
       }
+    }
+    // Bootstrap teamAccess for every repo from its current GitHub grants.
+    for (const r of results) {
+      if (!r.teamAccessError) r.repo.teamAccess = r.teamAccessActual;
     }
     await writeFileAtomic(HOUSEHOLD_JSON, formatRepos(manifest));
     console.error(`\nWrote inferred branchProtection config to ${path.relative(process.cwd(), HOUSEHOLD_JSON)}`);
