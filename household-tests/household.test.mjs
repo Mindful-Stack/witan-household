@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { parseRemoteUrl } from '../scripts/repos-sync-names.mjs';
 import { validateName } from '../scripts/new-repo.mjs';
+import { validateTeamAccessShape } from '../scripts/repo-policy.mjs';
 
 // Loads the real household.json and asserts its shape. Catches hand-edits that
 // the pure-function unit tests can't (since the manifest is mostly curated by
@@ -99,6 +100,12 @@ describe('household.json (per-repo shape)', () => {
           v === null || (typeof v === 'string' && v.length > 0),
           `requiredStatusCheck must be null or a non-empty string (got ${JSON.stringify(v)})`,
         );
+      });
+
+      it('teamAccess (if set) is a valid shape', () => {
+        if (!('teamAccess' in repo)) return; // optional / unmanaged
+        const errors = validateTeamAccessShape(repo.teamAccess);
+        assert.deepEqual(errors, [], `teamAccess errors: ${errors.join('; ')}`);
       });
     });
   }
