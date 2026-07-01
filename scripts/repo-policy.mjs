@@ -133,6 +133,28 @@ export function githubTargetFor(repoEntry) {
   return { org: parsed.slice(0, slash), repo: parsed.slice(slash + 1) };
 }
 
+// GitHub reports a team's repo permission redundantly: a legacy `permission`
+// string and a `permissions` boolean object. Normalize both to our five role
+// names so comparisons are apples-to-apples.
+const LEGACY_TO_LEVEL = { pull: 'read', triage: 'triage', push: 'write', maintain: 'maintain', admin: 'admin' };
+const PERMS_HIGH_TO_LOW = ['admin', 'maintain', 'push', 'triage', 'pull'];
+
+/** @param {{permissions?: object, permission?: string}} entry */
+export function normalizeTeamPermission(entry) {
+  const perms = entry?.permissions;
+  if (perms && typeof perms === 'object') {
+    for (const key of PERMS_HIGH_TO_LOW) {
+      if (perms[key]) return LEGACY_TO_LEVEL[key];
+    }
+  }
+  return LEGACY_TO_LEVEL[entry?.permission] ?? 'read';
+}
+
+// Our manifest vocabulary → the GitHub API `permission` value (PUT team-repo).
+export const PERMISSION_API = {
+  read: 'pull', triage: 'triage', write: 'push', maintain: 'maintain', admin: 'admin',
+};
+
 /**
  * Build the desired ruleset JSON for a repo.
  *
