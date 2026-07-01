@@ -870,6 +870,69 @@ async function cmdApply(repoName, { dryRun, yes }) {
   console.log(`${repo.name}: applied`);
 }
 
+async function cmdAccessApply(repoName, { dryRun, yes }) {
+  if (!repoName) {
+    console.error('access-apply: missing repo name. Usage: access-apply <repo> [--dry-run] [--yes]');
+    process.exit(2);
+  }
+  const manifest = JSON.parse(await readFile(HOUSEHOLD_JSON, 'utf8'));
+  const repo = manifest.repos.find(r => r.name === repoName);
+  if (!repo) { console.error(`access-apply: repo "${repoName}" not found in household.json`); process.exit(2); }
+  if (!repo.url) { console.log(`[skip] ${repo.name} (inline, no GitHub repo)`); return; }
+  if (!('teamAccess' in repo)) { console.log(`[skip] ${repo.name} (unmanaged: no teamAccess block)`); return; }
+
+  const ghTarget = githubTargetFor(repo);
+  if (!ghTarget) { console.error(`access-apply: ${repo.name}: cannot parse GitHub org/repo from url "${repo.url}"`); process.exit(1); }
+  const { org, repo: ghRepo } = ghTarget; // team org === repo owner === repo's own org
+
+  const declared = repo.teamAccess;
+
+  // Fail-fast: shape, then per-slug existence in the repo's org.
+  const shapeErrors = validateTeamAccessShape(declared);
+  if (shapeErrors.length) { for (const e of shapeErrors) console.error(`  ✗ ${e}`); process.exit(1); }
+  const existence = await Promise.all(
+    Object.keys(declared).map(async slug => ({ slug, exists: await teamExists(org, slug) })),
+  );
+  const unknown = existence.filter(e => !e.exists).map(e => e.slug);
+  if (unknown.length) {
+    console.error(`access-apply: ${repo.name}: declared team(s) not found in org ${org}: ${unknown.join(', ')}`);
+    process.exit(1);
+  }
+
+  const actual = await listRepoTeams(org, ghRepo);
+  const diff = diffTeamAccess(declared, actual);
+  if (!diff.grants.length && !diff.changes.length && !diff.revokes.length) {
+    console.log(`${repo.name}: no changes (team access already matches)`);
+    return;
+  }
+
+  console.log(`${repo.name}: team-access changes`);
+  for (const g of diff.grants) console.log(`  grant  ${g.team} → ${g.level}`);
+  for (const c of diff.changes) console.log(`  change ${c.team} ${c.from} → ${c.to}`);
+  for (const r of diff.revokes) console.log(`  REVOKE ${r.team} (currently ${r.level})`);
+
+  if (dryRun) { console.log(`${repo.name}: dry-run, no changes applied`); return; }
+
+  if (!yes) {
+    if (diff.revokes.length) {
+      console.log(`  ⚠ ${diff.revokes.length} team(s) will LOSE access: ${diff.revokes.map(r => r.team).join(', ')}`);
+    }
+    const proceed = await confirm(`Apply team-access changes to ${repo.name}? [y/N] `);
+    if (!proceed) { console.log(`${repo.name}: aborted`); return; }
+  }
+
+  for (const g of diff.grants) await putTeamRepoPermission(org, g.team, org, ghRepo, PERMISSION_API[g.level]);
+  for (const c of diff.changes) await putTeamRepoPermission(org, c.team, org, ghRepo, PERMISSION_API[c.to]);
+  for (const r of diff.revokes) {
+    try {
+      await deleteTeamRepoAccess(org, r.team, org, ghRepo);
+    } catch {
+      console.log(`  note: ${r.team} could not be removed directly — likely inherited from a parent team; reconcile via that team`);
+    }
+  }
+  console.log(`${repo.name}: applied`);
+}
+
 function help() {
   console.log(`Usage:
   ./scripts/repo-policy.mjs audit [--write]
@@ -919,6 +982,12 @@ async function main() {
       break;
     case 'apply':
       await cmdApply(positional[0], {
+        dryRun: flags.has('--dry-run'),
+        yes: flags.has('--yes') || flags.has('--no-confirm'),
+      });
+      break;
+    case 'access-apply':
+      await cmdAccessApply(positional[0], {
         dryRun: flags.has('--dry-run'),
         yes: flags.has('--yes') || flags.has('--no-confirm'),
       });
