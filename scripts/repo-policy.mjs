@@ -422,6 +422,28 @@ export function diffTeamAccess(declared, actual) {
   return { grants, changes, revokes };
 }
 
+export const TEAM_ACCESS_LEVELS = new Set(['read', 'triage', 'write', 'maintain', 'admin']);
+
+/**
+ * Pure shape validation for a teamAccess block. Returns human-readable errors
+ * (empty = valid). Team-existence is checked separately at apply time (IO).
+ * @param {unknown} block
+ * @returns {string[]}
+ */
+export function validateTeamAccessShape(block) {
+  if (block === null || typeof block !== 'object' || Array.isArray(block)) {
+    const got = block === null ? 'null' : Array.isArray(block) ? 'array' : typeof block;
+    return [`teamAccess must be an object of "team-slug": level (got ${got})`];
+  }
+  const errors = [];
+  for (const [team, level] of Object.entries(block)) {
+    if (typeof level !== 'string' || !TEAM_ACCESS_LEVELS.has(level)) {
+      errors.push(`team "${team}": invalid permission ${JSON.stringify(level)} (must be one of read, triage, write, maintain, admin)`);
+    }
+  }
+  return errors;
+}
+
 // === gh CLI wrapper ============================================================
 
 /**

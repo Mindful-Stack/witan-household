@@ -15,6 +15,7 @@ import {
   normalizeTeamPermission,
   PERMISSION_API,
   diffTeamAccess,
+  validateTeamAccessShape,
 } from './repo-policy.mjs';
 
 // === resolveOrg ===
@@ -640,5 +641,29 @@ describe('diffTeamAccess', () => {
   });
   it('empty declared + empty actual = no changes', () => {
     assert.deepEqual(diffTeamAccess({}, {}), { grants: [], changes: [], revokes: [] });
+  });
+});
+
+// === validateTeamAccessShape ===
+
+describe('validateTeamAccessShape', () => {
+  it('accepts an empty object and a valid map', () => {
+    assert.deepEqual(validateTeamAccessShape({}), []);
+    assert.deepEqual(validateTeamAccessShape({ devs: 'write', sec: 'read' }), []);
+  });
+  it('rejects null, arrays, and non-object scalars', () => {
+    assert.equal(validateTeamAccessShape(null).length, 1);
+    assert.equal(validateTeamAccessShape([]).length, 1);
+    assert.equal(validateTeamAccessShape('write').length, 1);
+    assert.equal(validateTeamAccessShape(5).length, 1);
+  });
+  it('rejects unknown permission levels and non-string values', () => {
+    assert.equal(validateTeamAccessShape({ a: 'owner' }).length, 1);
+    assert.equal(validateTeamAccessShape({ a: 5 }).length, 1);
+    assert.match(validateTeamAccessShape({ a: 'owner' })[0], /invalid permission/);
+  });
+  it('collects one error per bad entry', () => {
+    const errs = validateTeamAccessShape({ ok: 'write', bad1: 'x', bad2: 'y' });
+    assert.equal(errs.length, 2);
   });
 });
