@@ -9,7 +9,7 @@
 
 .PHONY: setup setup-core setup-all pull status \
         repos-create repos-rename repos-sync-names repos-sync-names-apply \
-        policy-audit policy-audit-write policy-apply policy-help \
+        policy-audit policy-audit-write policy-apply policy-help access-apply \
         update-kb test-scripts
 
 ##@ Setup
@@ -53,6 +53,9 @@ policy-apply: ## Apply the standard branch-protection policy (REPO=<name>)
 
 policy-help: ## Show repo-policy.mjs full --help
 	@./scripts/repo-policy.mjs help
+
+access-apply: ## Authoritatively reconcile a repo's team access (REPO=<name>) [DRY_RUN=1]
+	@./scripts/repo-policy.mjs access-apply $(REPO) $(if $(DRY_RUN),--dry-run)
 
 ##@ Maintenance
 update-kb: ## Pull every knowledge-base repo listed in household.json (ff-only, clean main)

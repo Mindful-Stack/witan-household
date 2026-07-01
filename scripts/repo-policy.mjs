@@ -947,6 +947,13 @@ function help() {
       --dry-run prints the diff and exits without changes.
       --yes (alias: --no-confirm) skips the interactive confirmation prompt.
 
+  ./scripts/repo-policy.mjs access-apply <repo> [--dry-run] [--yes]
+      Authoritatively reconcile one repo's team access to its household.json
+      teamAccess block: grant/raise/lower declared teams and REVOKE undeclared
+      ones. Skips repos with no teamAccess key (unmanaged). --dry-run previews.
+      Requires gh authed with read:org. Manages direct grants only (inherited
+      parent-team access is advisory).
+
   ./scripts/repo-policy.mjs help
       Show this message.
 
