@@ -81,6 +81,22 @@ hook tells the agent to prompt users with `make update-kb` when KBs are stale.
 Uses ff-only safety: only pulls on a clean `main`; fetches all KBs regardless
 of per-KB failures.
 
+## `repo-policy.mjs access-apply` — team access
+
+Declare `teamAccess` on a repo entry in `household.json`:
+
+```json
+{ "name": "portal", "url": "…", "teamAccess": { "developers": "write", "security": "read" } }
+```
+
+Levels: `read · triage · write · maintain · admin`. `make policy-audit` shows a
+team-access drift table for every repo; `make access-apply REPO=portal` makes
+GitHub match the block **authoritatively** — undeclared teams are revoked. Use
+`DRY_RUN=1` to preview. Team ops use each repo's own org (correct for mixed-org
+households). Absent `teamAccess` key = unmanaged (skipped); `{}` = no teams.
+Requires `gh` with `read:org`. Manages direct grants only (inherited parent-team
+access is advisory).
+
 ## Conventions
 
 - The GitHub org is never hardcoded: scripts derive it from the manifest's

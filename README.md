@@ -186,6 +186,7 @@ git clone <your-household-repo-url> .witan-tmp
 | `make policy-audit` | Read-only drift check of branch protection across every repo (markdown table) |
 | `make policy-apply REPO=foo` | Apply the standard branch-protection policy to one repo (idempotent) |
 | `make policy-audit-write` | Audit + persist current state to `household.json` (bootstrap only — typically run once) |
+| `make access-apply REPO=foo [DRY_RUN=1]` | Authoritatively reconcile repo `foo`'s team access to its `teamAccess` block (grant/change/revoke); `DRY_RUN=1` previews |
 | `make test` | All unit tests: workspace scripts, manifest shape checks (`household-tests/`), KB tooling |
 
 The GitHub org for all of these is derived from the `meta_repo` entry's `url` in `household.json`. Entries without a `url` (inline directories like `lore/`) are skipped wherever a real GitHub repo is required. Auth uses whatever `gh auth status` reports.
@@ -193,6 +194,8 @@ The GitHub org for all of these is derived from the `meta_repo` entry's `url` in
 ### About repo policy
 
 `scripts/repo-policy.mjs` keeps branch protection consistent across every repo in `household.json`. The standard (applied to each repo's default branch): blocks deletion + force-push, requires a PR with 1 review + thread resolution, allows squash-only merges, and — if `branchProtection.bypassTeam` is declared in the manifest — gives that team a PR-mode bypass. The bypass team is optional; without it the policy is simply strict for everyone.
+
+Team access is managed separately from branch protection: declare a `teamAccess` object (`{ "team-slug": "read|triage|write|maintain|admin" }`) on a repo entry, see drift in `make policy-audit`, and enforce it with `make access-apply REPO=<name>`. `access-apply` is authoritative — it revokes teams not in the block — so preview with `DRY_RUN=1` first. A repo with no `teamAccess` key is left unmanaged. Requires `gh` authed with `read:org`.
 
 ### Tips
 
