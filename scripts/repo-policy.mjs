@@ -583,6 +583,31 @@ async function postRuleset(org, repo, ruleset) {
   );
 }
 
+/** Normalized direct team grants on a repo: { slug: level }. */
+async function listRepoTeams(org, repo) {
+  const teams = (await gh(['api', `repos/${org}/${repo}/teams`, '--paginate'])) || [];
+  const map = {};
+  for (const t of teams) map[t.slug] = normalizeTeamPermission(t);
+  return map;
+}
+
+/** True if the team slug exists in the org (works for secret teams the token can see). */
+async function teamExists(org, slug) {
+  const team = await gh(['api', `orgs/${org}/teams/${slug}`], { swallow404: true });
+  return team !== null;
+}
+
+async function putTeamRepoPermission(org, slug, owner, repo, apiPerm) {
+  return gh(
+    ['api', `orgs/${org}/teams/${slug}/repos/${owner}/${repo}`, '-X', 'PUT', '--input', '-'],
+    { stdin: JSON.stringify({ permission: apiPerm }) },
+  );
+}
+
+async function deleteTeamRepoAccess(org, slug, owner, repo) {
+  return gh(['api', `orgs/${org}/teams/${slug}/repos/${owner}/${repo}`, '-X', 'DELETE']);
+}
+
 /**
  * Interactive y/N prompt. Returns true only on an explicit "y"/"yes".
  */
