@@ -14,6 +14,7 @@ import {
   githubTargetFor,
   normalizeTeamPermission,
   PERMISSION_API,
+  diffTeamAccess,
 } from './repo-policy.mjs';
 
 // === resolveOrg ===
@@ -605,5 +606,39 @@ describe('PERMISSION_API', () => {
     assert.deepEqual(PERMISSION_API, {
       read: 'pull', triage: 'triage', write: 'push', maintain: 'maintain', admin: 'admin',
     });
+  });
+});
+
+// === diffTeamAccess ===
+
+describe('diffTeamAccess', () => {
+  it('reports a grant for a declared team absent on GitHub', () => {
+    assert.deepEqual(diffTeamAccess({ devs: 'write' }, {}), {
+      grants: [{ team: 'devs', level: 'write' }], changes: [], revokes: [],
+    });
+  });
+  it('reports a change when the level differs', () => {
+    assert.deepEqual(diffTeamAccess({ sec: 'maintain' }, { sec: 'read' }), {
+      grants: [], changes: [{ team: 'sec', from: 'read', to: 'maintain' }], revokes: [],
+    });
+  });
+  it('reports a revoke (with its actual level) for an undeclared team', () => {
+    assert.deepEqual(diffTeamAccess({}, { qa: 'read' }), {
+      grants: [], changes: [], revokes: [{ team: 'qa', level: 'read' }],
+    });
+  });
+  it('is empty when declared and actual match exactly', () => {
+    assert.deepEqual(diffTeamAccess({ a: 'write', b: 'read' }, { a: 'write', b: 'read' }), {
+      grants: [], changes: [], revokes: [],
+    });
+  });
+  it('handles a mix of grant, change, and revoke', () => {
+    const d = diffTeamAccess({ a: 'write', b: 'admin' }, { b: 'read', c: 'triage' });
+    assert.deepEqual(d.grants, [{ team: 'a', level: 'write' }]);
+    assert.deepEqual(d.changes, [{ team: 'b', from: 'read', to: 'admin' }]);
+    assert.deepEqual(d.revokes, [{ team: 'c', level: 'triage' }]);
+  });
+  it('empty declared + empty actual = no changes', () => {
+    assert.deepEqual(diffTeamAccess({}, {}), { grants: [], changes: [], revokes: [] });
   });
 });

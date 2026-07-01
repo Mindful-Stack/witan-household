@@ -404,6 +404,24 @@ export function resolveBypassTeamFromManifest(manifest) {
   return { id: null, slug: config.slug, cached: false };
 }
 
+/**
+ * Authoritative diff of a declared team-access map against the actual one.
+ * @param {Record<string,string>} declared
+ * @param {Record<string,string>} actual
+ * @returns {{grants:{team:string,level:string}[], changes:{team:string,from:string,to:string}[], revokes:{team:string,level:string}[]}}
+ */
+export function diffTeamAccess(declared, actual) {
+  const grants = [], changes = [], revokes = [];
+  for (const [team, level] of Object.entries(declared)) {
+    if (!(team in actual)) grants.push({ team, level });
+    else if (actual[team] !== level) changes.push({ team, from: actual[team], to: level });
+  }
+  for (const [team, level] of Object.entries(actual)) {
+    if (!(team in declared)) revokes.push({ team, level });
+  }
+  return { grants, changes, revokes };
+}
+
 // === gh CLI wrapper ============================================================
 
 /**
