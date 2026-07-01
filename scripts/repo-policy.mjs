@@ -444,6 +444,32 @@ export function validateTeamAccessShape(block) {
   return errors;
 }
 
+/**
+ * Render an actual team map as a sorted "slug:level, …" cell, or "(none)".
+ * @param {Record<string,string>} actualMap
+ * @returns {string}
+ */
+export function formatTeamAccessActual(actualMap) {
+  const entries = Object.entries(actualMap);
+  if (entries.length === 0) return '(none)';
+  return entries.sort(([a], [b]) => a.localeCompare(b)).map(([t, l]) => `${t}:${l}`).join(', ');
+}
+
+/**
+ * Render a diff as the audit "Drift" cell. `managed` false ⇒ unmanaged repo.
+ * @param {{grants:{team:string,level:string}[], changes:{team:string,from:string,to:string}[], revokes:{team:string,level:string}[]}} diff
+ * @param {{managed:boolean}} options
+ * @returns {string}
+ */
+export function formatTeamAccessDrift(diff, { managed }) {
+  if (!managed) return '— unmanaged';
+  const parts = [];
+  for (const g of diff.grants) parts.push(`- ${g.team}:${g.level} (missing)`);
+  for (const c of diff.changes) parts.push(`${c.team} ${c.from}→${c.to}`);
+  for (const r of diff.revokes) parts.push(`+ ${r.team}:${r.level} (undeclared)`);
+  return parts.length ? parts.join('; ') : '✓ in sync';
+}
+
 // === gh CLI wrapper ============================================================
 
 /**

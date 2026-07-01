@@ -16,6 +16,8 @@ import {
   PERMISSION_API,
   diffTeamAccess,
   validateTeamAccessShape,
+  formatTeamAccessActual,
+  formatTeamAccessDrift,
 } from './repo-policy.mjs';
 
 // === resolveOrg ===
@@ -665,5 +667,39 @@ describe('validateTeamAccessShape', () => {
   it('collects one error per bad entry', () => {
     const errs = validateTeamAccessShape({ ok: 'write', bad1: 'x', bad2: 'y' });
     assert.equal(errs.length, 2);
+  });
+});
+
+// === formatTeamAccessActual ===
+
+describe('formatTeamAccessActual', () => {
+  it('renders "(none)" for an empty map', () => {
+    assert.equal(formatTeamAccessActual({}), '(none)');
+  });
+  it('renders sorted slug:level pairs', () => {
+    assert.equal(formatTeamAccessActual({ qa: 'read', devs: 'write' }), 'devs:write, qa:read');
+  });
+});
+
+// === formatTeamAccessDrift ===
+
+describe('formatTeamAccessDrift', () => {
+  const empty = { grants: [], changes: [], revokes: [] };
+  it('renders "— unmanaged" when not managed', () => {
+    assert.equal(formatTeamAccessDrift(empty, { managed: false }), '— unmanaged');
+  });
+  it('renders "✓ in sync" when managed and no diff', () => {
+    assert.equal(formatTeamAccessDrift(empty, { managed: true }), '✓ in sync');
+  });
+  it('summarizes grants, changes, and revokes', () => {
+    const diff = {
+      grants: [{ team: 'devs', level: 'write' }],
+      changes: [{ team: 'sec', from: 'read', to: 'maintain' }],
+      revokes: [{ team: 'qa', level: 'read' }],
+    };
+    const out = formatTeamAccessDrift(diff, { managed: true });
+    assert.match(out, /- devs:write \(missing\)/);
+    assert.match(out, /sec read→maintain/);
+    assert.match(out, /\+ qa:read \(undeclared\)/);
   });
 });
