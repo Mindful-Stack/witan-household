@@ -921,14 +921,31 @@ async function cmdAccessApply(repoName, { dryRun, yes }) {
     if (!proceed) { console.log(`${repo.name}: aborted`); return; }
   }
 
-  for (const g of diff.grants) await putTeamRepoPermission(org, g.team, org, ghRepo, PERMISSION_API[g.level]);
-  for (const c of diff.changes) await putTeamRepoPermission(org, c.team, org, ghRepo, PERMISSION_API[c.to]);
+  // Apply every operation, but never misreport a real failure as success:
+  // collect any failures and exit non-zero so the authoritative-reconcile
+  // contract holds. (Inherited parent-team access is NOT force-removed here —
+  // GitHub's DELETE no-ops on a non-direct grant rather than erroring, so an
+  // inherited grant simply persists and reappears as advisory drift on the next
+  // `audit`; it is not a failure. A DELETE that *does* error is a real problem
+  // — auth/API/network — and is reported below, not swallowed.)
+  const failures = [];
+  for (const g of diff.grants) {
+    try { await putTeamRepoPermission(org, g.team, org, ghRepo, PERMISSION_API[g.level]); }
+    catch (e) { failures.push(`grant ${g.team}=${g.level}: ${e.message}`); }
+  }
+  for (const c of diff.changes) {
+    try { await putTeamRepoPermission(org, c.team, org, ghRepo, PERMISSION_API[c.to]); }
+    catch (e) { failures.push(`change ${c.team}→${c.to}: ${e.message}`); }
+  }
   for (const r of diff.revokes) {
-    try {
-      await deleteTeamRepoAccess(org, r.team, org, ghRepo);
-    } catch {
-      console.log(`  note: ${r.team} could not be removed directly — likely inherited from a parent team; reconcile via that team`);
-    }
+    try { await deleteTeamRepoAccess(org, r.team, org, ghRepo); }
+    catch (e) { failures.push(`revoke ${r.team}: ${e.message}`); }
+  }
+
+  if (failures.length) {
+    console.error(`${repo.name}: ${failures.length} operation(s) FAILED — team access NOT fully reconciled:`);
+    for (const f of failures) console.error(`  ✗ ${f}`);
+    process.exit(1);
   }
   console.log(`${repo.name}: applied`);
 }
