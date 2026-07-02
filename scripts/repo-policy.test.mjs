@@ -12,6 +12,12 @@ import {
   formatBypassActors,
   resolveBypassTeamFromManifest,
   githubTargetFor,
+  normalizeTeamPermission,
+  PERMISSION_API,
+  diffTeamAccess,
+  validateTeamAccessShape,
+  formatTeamAccessActual,
+  formatTeamAccessDrift,
 } from './repo-policy.mjs';
 
 // === resolveOrg ===
@@ -569,5 +575,131 @@ describe('resolveBypassTeamFromManifest', () => {
     assert.equal(resolveBypassTeamFromManifest({ repos: [] }), null);
     assert.equal(resolveBypassTeamFromManifest({ branchProtection: {}, repos: [] }), null);
     assert.equal(resolveBypassTeamFromManifest({ branchProtection: { bypassTeam: {} }, repos: [] }), null);
+  });
+});
+
+// === normalizeTeamPermission ===
+
+describe('normalizeTeamPermission', () => {
+  it('reads the highest-privilege true from the permissions object', () => {
+    const p = (o) => normalizeTeamPermission({ permissions: o });
+    assert.equal(p({ pull: true, triage: true, push: true, maintain: true, admin: true }), 'admin');
+    assert.equal(p({ pull: true, triage: true, push: true, maintain: true, admin: false }), 'maintain');
+    assert.equal(p({ pull: true, triage: true, push: true, maintain: false, admin: false }), 'write');
+    assert.equal(p({ pull: true, triage: true, push: false, maintain: false, admin: false }), 'triage');
+    assert.equal(p({ pull: true, triage: false, push: false, maintain: false, admin: false }), 'read');
+  });
+
+  it('falls back to the legacy permission string when no permissions object', () => {
+    assert.equal(normalizeTeamPermission({ permission: 'push' }), 'write');
+    assert.equal(normalizeTeamPermission({ permission: 'pull' }), 'read');
+    assert.equal(normalizeTeamPermission({ permission: 'admin' }), 'admin');
+    assert.equal(normalizeTeamPermission({ permission: 'maintain' }), 'maintain');
+    assert.equal(normalizeTeamPermission({ permission: 'triage' }), 'triage');
+  });
+
+  it('defaults to read for an unrecognisable/empty entry', () => {
+    assert.equal(normalizeTeamPermission({}), 'read');
+    assert.equal(normalizeTeamPermission({ permission: 'weird' }), 'read');
+  });
+});
+
+describe('PERMISSION_API', () => {
+  it('maps our vocabulary to GitHub API permission values', () => {
+    assert.deepEqual(PERMISSION_API, {
+      read: 'pull', triage: 'triage', write: 'push', maintain: 'maintain', admin: 'admin',
+    });
+  });
+});
+
+// === diffTeamAccess ===
+
+describe('diffTeamAccess', () => {
+  it('reports a grant for a declared team absent on GitHub', () => {
+    assert.deepEqual(diffTeamAccess({ devs: 'write' }, {}), {
+      grants: [{ team: 'devs', level: 'write' }], changes: [], revokes: [],
+    });
+  });
+  it('reports a change when the level differs', () => {
+    assert.deepEqual(diffTeamAccess({ sec: 'maintain' }, { sec: 'read' }), {
+      grants: [], changes: [{ team: 'sec', from: 'read', to: 'maintain' }], revokes: [],
+    });
+  });
+  it('reports a revoke (with its actual level) for an undeclared team', () => {
+    assert.deepEqual(diffTeamAccess({}, { qa: 'read' }), {
+      grants: [], changes: [], revokes: [{ team: 'qa', level: 'read' }],
+    });
+  });
+  it('is empty when declared and actual match exactly', () => {
+    assert.deepEqual(diffTeamAccess({ a: 'write', b: 'read' }, { a: 'write', b: 'read' }), {
+      grants: [], changes: [], revokes: [],
+    });
+  });
+  it('handles a mix of grant, change, and revoke', () => {
+    const d = diffTeamAccess({ a: 'write', b: 'admin' }, { b: 'read', c: 'triage' });
+    assert.deepEqual(d.grants, [{ team: 'a', level: 'write' }]);
+    assert.deepEqual(d.changes, [{ team: 'b', from: 'read', to: 'admin' }]);
+    assert.deepEqual(d.revokes, [{ team: 'c', level: 'triage' }]);
+  });
+  it('empty declared + empty actual = no changes', () => {
+    assert.deepEqual(diffTeamAccess({}, {}), { grants: [], changes: [], revokes: [] });
+  });
+});
+
+// === validateTeamAccessShape ===
+
+describe('validateTeamAccessShape', () => {
+  it('accepts an empty object and a valid map', () => {
+    assert.deepEqual(validateTeamAccessShape({}), []);
+    assert.deepEqual(validateTeamAccessShape({ devs: 'write', sec: 'read' }), []);
+  });
+  it('rejects null, arrays, and non-object scalars', () => {
+    assert.equal(validateTeamAccessShape(null).length, 1);
+    assert.equal(validateTeamAccessShape([]).length, 1);
+    assert.equal(validateTeamAccessShape('write').length, 1);
+    assert.equal(validateTeamAccessShape(5).length, 1);
+  });
+  it('rejects unknown permission levels and non-string values', () => {
+    assert.equal(validateTeamAccessShape({ a: 'owner' }).length, 1);
+    assert.equal(validateTeamAccessShape({ a: 5 }).length, 1);
+    assert.match(validateTeamAccessShape({ a: 'owner' })[0], /invalid permission/);
+  });
+  it('collects one error per bad entry', () => {
+    const errs = validateTeamAccessShape({ ok: 'write', bad1: 'x', bad2: 'y' });
+    assert.equal(errs.length, 2);
+  });
+});
+
+// === formatTeamAccessActual ===
+
+describe('formatTeamAccessActual', () => {
+  it('renders "(none)" for an empty map', () => {
+    assert.equal(formatTeamAccessActual({}), '(none)');
+  });
+  it('renders sorted slug:level pairs', () => {
+    assert.equal(formatTeamAccessActual({ qa: 'read', devs: 'write' }), 'devs:write, qa:read');
+  });
+});
+
+// === formatTeamAccessDrift ===
+
+describe('formatTeamAccessDrift', () => {
+  const empty = { grants: [], changes: [], revokes: [] };
+  it('renders "— unmanaged" when not managed', () => {
+    assert.equal(formatTeamAccessDrift(empty, { managed: false }), '— unmanaged');
+  });
+  it('renders "✓ in sync" when managed and no diff', () => {
+    assert.equal(formatTeamAccessDrift(empty, { managed: true }), '✓ in sync');
+  });
+  it('summarizes grants, changes, and revokes', () => {
+    const diff = {
+      grants: [{ team: 'devs', level: 'write' }],
+      changes: [{ team: 'sec', from: 'read', to: 'maintain' }],
+      revokes: [{ team: 'qa', level: 'read' }],
+    };
+    const out = formatTeamAccessDrift(diff, { managed: true });
+    assert.match(out, /- devs:write \(missing\)/);
+    assert.match(out, /sec read→maintain/);
+    assert.match(out, /\+ qa:read \(undeclared\)/);
   });
 });

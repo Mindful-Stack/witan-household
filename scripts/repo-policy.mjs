@@ -133,6 +133,28 @@ export function githubTargetFor(repoEntry) {
   return { org: parsed.slice(0, slash), repo: parsed.slice(slash + 1) };
 }
 
+// GitHub reports a team's repo permission redundantly: a legacy `permission`
+// string and a `permissions` boolean object. Normalize both to our five role
+// names so comparisons are apples-to-apples.
+const LEGACY_TO_LEVEL = { pull: 'read', triage: 'triage', push: 'write', maintain: 'maintain', admin: 'admin' };
+const PERMS_HIGH_TO_LOW = ['admin', 'maintain', 'push', 'triage', 'pull'];
+
+/** @param {{permissions?: object, permission?: string}} entry */
+export function normalizeTeamPermission(entry) {
+  const perms = entry?.permissions;
+  if (perms && typeof perms === 'object') {
+    for (const key of PERMS_HIGH_TO_LOW) {
+      if (perms[key]) return LEGACY_TO_LEVEL[key];
+    }
+  }
+  return LEGACY_TO_LEVEL[entry?.permission] ?? 'read';
+}
+
+// Our manifest vocabulary → the GitHub API `permission` value (PUT team-repo).
+export const PERMISSION_API = {
+  read: 'pull', triage: 'triage', write: 'push', maintain: 'maintain', admin: 'admin',
+};
+
 /**
  * Build the desired ruleset JSON for a repo.
  *
@@ -382,6 +404,72 @@ export function resolveBypassTeamFromManifest(manifest) {
   return { id: null, slug: config.slug, cached: false };
 }
 
+/**
+ * Authoritative diff of a declared team-access map against the actual one.
+ * @param {Record<string,string>} declared
+ * @param {Record<string,string>} actual
+ * @returns {{grants:{team:string,level:string}[], changes:{team:string,from:string,to:string}[], revokes:{team:string,level:string}[]}}
+ */
+export function diffTeamAccess(declared, actual) {
+  const grants = [], changes = [], revokes = [];
+  for (const [team, level] of Object.entries(declared)) {
+    if (!(team in actual)) grants.push({ team, level });
+    else if (actual[team] !== level) changes.push({ team, from: actual[team], to: level });
+  }
+  for (const [team, level] of Object.entries(actual)) {
+    if (!(team in declared)) revokes.push({ team, level });
+  }
+  return { grants, changes, revokes };
+}
+
+export const TEAM_ACCESS_LEVELS = new Set(['read', 'triage', 'write', 'maintain', 'admin']);
+
+/**
+ * Pure shape validation for a teamAccess block. Returns human-readable errors
+ * (empty = valid). Team-existence is checked separately at apply time (IO).
+ * @param {unknown} block
+ * @returns {string[]}
+ */
+export function validateTeamAccessShape(block) {
+  if (block === null || typeof block !== 'object' || Array.isArray(block)) {
+    const got = block === null ? 'null' : Array.isArray(block) ? 'array' : typeof block;
+    return [`teamAccess must be an object of "team-slug": level (got ${got})`];
+  }
+  const errors = [];
+  for (const [team, level] of Object.entries(block)) {
+    if (typeof level !== 'string' || !TEAM_ACCESS_LEVELS.has(level)) {
+      errors.push(`team "${team}": invalid permission ${JSON.stringify(level)} (must be one of read, triage, write, maintain, admin)`);
+    }
+  }
+  return errors;
+}
+
+/**
+ * Render an actual team map as a sorted "slug:level, …" cell, or "(none)".
+ * @param {Record<string,string>} actualMap
+ * @returns {string}
+ */
+export function formatTeamAccessActual(actualMap) {
+  const entries = Object.entries(actualMap);
+  if (entries.length === 0) return '(none)';
+  return entries.sort(([a], [b]) => a.localeCompare(b)).map(([t, l]) => `${t}:${l}`).join(', ');
+}
+
+/**
+ * Render a diff as the audit "Drift" cell. `managed` false ⇒ unmanaged repo.
+ * @param {{grants:{team:string,level:string}[], changes:{team:string,from:string,to:string}[], revokes:{team:string,level:string}[]}} diff
+ * @param {{managed:boolean}} options
+ * @returns {string}
+ */
+export function formatTeamAccessDrift(diff, { managed }) {
+  if (!managed) return '— unmanaged';
+  const parts = [];
+  for (const g of diff.grants) parts.push(`- ${g.team}:${g.level} (missing)`);
+  for (const c of diff.changes) parts.push(`${c.team} ${c.from}→${c.to}`);
+  for (const r of diff.revokes) parts.push(`+ ${r.team}:${r.level} (undeclared)`);
+  return parts.length ? parts.join('; ') : '✓ in sync';
+}
+
 // === gh CLI wrapper ============================================================
 
 /**
@@ -495,6 +583,31 @@ async function postRuleset(org, repo, ruleset) {
   );
 }
 
+/** Normalized direct team grants on a repo: { slug: level }. */
+async function listRepoTeams(org, repo) {
+  const teams = (await gh(['api', `repos/${org}/${repo}/teams`, '--paginate'])) || [];
+  const map = {};
+  for (const t of teams) map[t.slug] = normalizeTeamPermission(t);
+  return map;
+}
+
+/** True if the team slug exists in the org (works for secret teams the token can see). */
+async function teamExists(org, slug) {
+  const team = await gh(['api', `orgs/${org}/teams/${slug}`], { swallow404: true });
+  return team !== null;
+}
+
+async function putTeamRepoPermission(org, slug, owner, repo, apiPerm) {
+  return gh(
+    ['api', `orgs/${org}/teams/${slug}/repos/${owner}/${repo}`, '-X', 'PUT', '--input', '-'],
+    { stdin: JSON.stringify({ permission: apiPerm }) },
+  );
+}
+
+async function deleteTeamRepoAccess(org, slug, owner, repo) {
+  return gh(['api', `orgs/${org}/teams/${slug}/repos/${owner}/${repo}`, '-X', 'DELETE']);
+}
+
 /**
  * Interactive y/N prompt. Returns true only on an explicit "y"/"yes".
  */
@@ -552,6 +665,14 @@ async function cmdAudit({ write }) {
           .map(r => getRulesetDetail(ghOrg, ghRepo, r.id))
     );
     const summary = summarizeState(details, classic, repoMeta);
+    // Team access (per-repo-org). Degrade to an error marker so one repo's
+    // failure doesn't reject the whole audit.
+    let teamAccessActual = null, teamAccessError = null;
+    try {
+      teamAccessActual = await listRepoTeams(ghOrg, ghRepo);
+    } catch (e) {
+      teamAccessError = e.message;
+    }
     return {
       repo,
       ghOrg,
@@ -559,6 +680,8 @@ async function cmdAudit({ write }) {
       activeCount: details.length,
       inactiveCount: list.length - details.length,
       ...summary,
+      teamAccessActual,
+      teamAccessError,
     };
   }));
 
@@ -586,6 +709,26 @@ async function cmdAudit({ write }) {
     console.log(`| ${displayName} | ${r.state} | ${count} | ${reviews} | ${squash} | ${threads} | ${co} | ${bypassStr} | ${sc} | ${delOnMerge} |`);
   }
 
+  // Team-access drift table.
+  console.log('\n## Team access');
+  console.log('| Repo | Teams on GitHub | Drift vs manifest |');
+  console.log('| --- | --- | --- |');
+  for (const r of results) {
+    const managed = 'teamAccess' in r.repo;
+    let teams, drift;
+    if (r.teamAccessError) {
+      teams = '⚠ error';
+      drift = `⚠ ${r.teamAccessError}`;
+    } else {
+      teams = formatTeamAccessActual(r.teamAccessActual);
+      const diff = diffTeamAccess(managed ? r.repo.teamAccess : {}, r.teamAccessActual);
+      drift = formatTeamAccessDrift(diff, { managed });
+    }
+    const displayName = r.ghRepo && r.ghRepo !== r.repo.name
+      ? `${r.repo.name} (${r.ghOrg}/${r.ghRepo})` : r.repo.name;
+    console.log(`| ${displayName} | ${teams} | ${drift} |`);
+  }
+
   if (write) {
     // Persist bypass team id if a slug is configured but the id wasn't cached.
     if (bypass && !bypass.cached) {
@@ -598,6 +741,10 @@ async function cmdAudit({ write }) {
       else if (!('requiredStatusCheck' in r.repo.branchProtection)) {
         r.repo.branchProtection.requiredStatusCheck = null;
       }
+    }
+    // Bootstrap teamAccess for every repo from its current GitHub grants.
+    for (const r of results) {
+      if (!r.teamAccessError) r.repo.teamAccess = r.teamAccessActual;
     }
     await writeFileAtomic(HOUSEHOLD_JSON, formatRepos(manifest));
     console.error(`\nWrote inferred branchProtection config to ${path.relative(process.cwd(), HOUSEHOLD_JSON)}`);
@@ -723,6 +870,86 @@ async function cmdApply(repoName, { dryRun, yes }) {
   console.log(`${repo.name}: applied`);
 }
 
+async function cmdAccessApply(repoName, { dryRun, yes }) {
+  if (!repoName) {
+    console.error('access-apply: missing repo name. Usage: access-apply <repo> [--dry-run] [--yes]');
+    process.exit(2);
+  }
+  const manifest = JSON.parse(await readFile(HOUSEHOLD_JSON, 'utf8'));
+  const repo = manifest.repos.find(r => r.name === repoName);
+  if (!repo) { console.error(`access-apply: repo "${repoName}" not found in household.json`); process.exit(2); }
+  if (!repo.url) { console.log(`[skip] ${repo.name} (inline, no GitHub repo)`); return; }
+  if (!('teamAccess' in repo)) { console.log(`[skip] ${repo.name} (unmanaged: no teamAccess block)`); return; }
+
+  const ghTarget = githubTargetFor(repo);
+  if (!ghTarget) { console.error(`access-apply: ${repo.name}: cannot parse GitHub org/repo from url "${repo.url}"`); process.exit(1); }
+  const { org, repo: ghRepo } = ghTarget; // team org === repo owner === repo's own org
+
+  const declared = repo.teamAccess;
+
+  // Fail-fast: shape, then per-slug existence in the repo's org.
+  const shapeErrors = validateTeamAccessShape(declared);
+  if (shapeErrors.length) { for (const e of shapeErrors) console.error(`  ✗ ${e}`); process.exit(1); }
+  const existence = await Promise.all(
+    Object.keys(declared).map(async slug => ({ slug, exists: await teamExists(org, slug) })),
+  );
+  const unknown = existence.filter(e => !e.exists).map(e => e.slug);
+  if (unknown.length) {
+    console.error(`access-apply: ${repo.name}: declared team(s) not found in org ${org}: ${unknown.join(', ')}`);
+    process.exit(1);
+  }
+
+  const actual = await listRepoTeams(org, ghRepo);
+  const diff = diffTeamAccess(declared, actual);
+  if (!diff.grants.length && !diff.changes.length && !diff.revokes.length) {
+    console.log(`${repo.name}: no changes (team access already matches)`);
+    return;
+  }
+
+  console.log(`${repo.name}: team-access changes`);
+  for (const g of diff.grants) console.log(`  grant  ${g.team} → ${g.level}`);
+  for (const c of diff.changes) console.log(`  change ${c.team} ${c.from} → ${c.to}`);
+  for (const r of diff.revokes) console.log(`  REVOKE ${r.team} (currently ${r.level})`);
+
+  if (dryRun) { console.log(`${repo.name}: dry-run, no changes applied`); return; }
+
+  if (!yes) {
+    if (diff.revokes.length) {
+      console.log(`  ⚠ ${diff.revokes.length} team(s) will LOSE access: ${diff.revokes.map(r => r.team).join(', ')}`);
+    }
+    const proceed = await confirm(`Apply team-access changes to ${repo.name}? [y/N] `);
+    if (!proceed) { console.log(`${repo.name}: aborted`); return; }
+  }
+
+  // Apply every operation, but never misreport a real failure as success:
+  // collect any failures and exit non-zero so the authoritative-reconcile
+  // contract holds. (Inherited parent-team access is NOT force-removed here —
+  // GitHub's DELETE no-ops on a non-direct grant rather than erroring, so an
+  // inherited grant simply persists and reappears as advisory drift on the next
+  // `audit`; it is not a failure. A DELETE that *does* error is a real problem
+  // — auth/API/network — and is reported below, not swallowed.)
+  const failures = [];
+  for (const g of diff.grants) {
+    try { await putTeamRepoPermission(org, g.team, org, ghRepo, PERMISSION_API[g.level]); }
+    catch (e) { failures.push(`grant ${g.team}=${g.level}: ${e.message}`); }
+  }
+  for (const c of diff.changes) {
+    try { await putTeamRepoPermission(org, c.team, org, ghRepo, PERMISSION_API[c.to]); }
+    catch (e) { failures.push(`change ${c.team}→${c.to}: ${e.message}`); }
+  }
+  for (const r of diff.revokes) {
+    try { await deleteTeamRepoAccess(org, r.team, org, ghRepo); }
+    catch (e) { failures.push(`revoke ${r.team}: ${e.message}`); }
+  }
+
+  if (failures.length) {
+    console.error(`${repo.name}: ${failures.length} operation(s) FAILED — team access NOT fully reconciled:`);
+    for (const f of failures) console.error(`  ✗ ${f}`);
+    process.exit(1);
+  }
+  console.log(`${repo.name}: applied`);
+}
+
 function help() {
   console.log(`Usage:
   ./scripts/repo-policy.mjs audit [--write]
@@ -736,6 +963,13 @@ function help() {
       Idempotent (PUT if a matching-name ruleset exists, POST otherwise).
       --dry-run prints the diff and exits without changes.
       --yes (alias: --no-confirm) skips the interactive confirmation prompt.
+
+  ./scripts/repo-policy.mjs access-apply <repo> [--dry-run] [--yes]
+      Authoritatively reconcile one repo's team access to its household.json
+      teamAccess block: grant/raise/lower declared teams and REVOKE undeclared
+      ones. Skips repos with no teamAccess key (unmanaged). --dry-run previews.
+      Requires gh authed with read:org. Manages direct grants only (inherited
+      parent-team access is advisory).
 
   ./scripts/repo-policy.mjs help
       Show this message.
@@ -772,6 +1006,12 @@ async function main() {
       break;
     case 'apply':
       await cmdApply(positional[0], {
+        dryRun: flags.has('--dry-run'),
+        yes: flags.has('--yes') || flags.has('--no-confirm'),
+      });
+      break;
+    case 'access-apply':
+      await cmdAccessApply(positional[0], {
         dryRun: flags.has('--dry-run'),
         yes: flags.has('--yes') || flags.has('--no-confirm'),
       });
