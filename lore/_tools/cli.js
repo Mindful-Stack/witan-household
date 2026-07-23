@@ -4,10 +4,9 @@
 const path = require('path');
 const fs = require('fs');
 
-const { validateAll: validateFrontmatter } = require('./validate-frontmatter');
+const { validateAll: validateFrontmatter, tagHealth } = require('./validate-frontmatter');
 const { validateAll: validateLinks } = require('./validate-links');
 const { findOrphans } = require('./check-orphans');
-const { writeIndex, checkIndex } = require('./build-index');
 
 // --- Argument parsing ---
 
@@ -76,6 +75,10 @@ function fail(msg) {
   console.log(`[FAIL] ${msg}`);
 }
 
+function info(msg) {
+  console.log(`[INFO] ${msg}`);
+}
+
 // --- Commands ---
 
 /**
@@ -140,54 +143,20 @@ function cmdValidate(knowledgeDir, flags) {
     }
   }
 
+  // Tag health (informational — never affects exit code). Tags are the
+  // retrieval vocabulary, so this reports drift, not policy violations.
+  if (runAll || flags.frontmatter) {
+    const health = tagHealth(knowledgeDir);
+    if (health.nearDuplicates.length > 0) {
+      const pairs = health.nearDuplicates.map(([a, b]) => `${a}~${b}`).join(', ');
+      info(`${health.nearDuplicates.length} near-duplicate tag pair(s) — likely drift: ${pairs}`);
+    }
+    if (health.singletons.length > 0) {
+      info(`${health.singletons.length}/${health.distinctTags} tags used once (can't cluster) — prefer reusing an existing tag`);
+    }
+  }
+
   return hasErrors ? 1 : 0;
-}
-
-/**
- * Run build-index command.
- * @param {string} knowledgeDir
- * @returns {number} Exit code
- */
-function cmdBuildIndex(knowledgeDir) {
-  if (!fs.existsSync(knowledgeDir)) {
-    fail(`Knowledge directory not found: ${knowledgeDir}`);
-    return 1;
-  }
-
-  try {
-    writeIndex(knowledgeDir);
-    const indexPath = path.join(knowledgeDir, '_index.json');
-    ok(`Index built: ${indexPath}`);
-    return 0;
-  } catch (err) {
-    fail(`Failed to build index: ${err.message}`);
-    return 1;
-  }
-}
-
-/**
- * Run check-index command.
- * @param {string} knowledgeDir
- * @returns {number} Exit code
- */
-function cmdCheckIndex(knowledgeDir) {
-  if (!fs.existsSync(knowledgeDir)) {
-    fail(`Knowledge directory not found: ${knowledgeDir}`);
-    return 1;
-  }
-
-  const result = checkIndex(knowledgeDir);
-
-  if (result.upToDate) {
-    ok('_index.json is up to date');
-    return 0;
-  }
-
-  fail('_index.json is stale. Run `node src/cli.js build-index` to update.');
-  if (result.diff) {
-    console.log(result.diff);
-  }
-  return 1;
 }
 
 /**
@@ -201,8 +170,6 @@ Commands:
   validate --frontmatter    Only frontmatter validation
   validate --links          Only link validation
   validate --orphans        Only orphan check (warnings)
-  build-index               Rebuild _index.json
-  check-index               Verify _index.json is up to date
   doctor                    Run full workspace + KB diagnostic
   help                      Show this help message
 
@@ -229,7 +196,7 @@ function main() {
     process.exit(0);
   }
 
-  if (!['validate', 'build-index', 'check-index', 'doctor'].includes(command)) {
+  if (!['validate', 'doctor'].includes(command)) {
     console.error(`Unknown command: ${command}`);
     console.error('Run `node src/cli.js help` for usage information.');
     process.exit(1);
@@ -241,12 +208,6 @@ function main() {
   switch (command) {
     case 'validate':
       exitCode = cmdValidate(knowledgeDir, flags);
-      break;
-    case 'build-index':
-      exitCode = cmdBuildIndex(knowledgeDir);
-      break;
-    case 'check-index':
-      exitCode = cmdCheckIndex(knowledgeDir);
       break;
     case 'doctor': {
       const { runDoctor } = require('./doctor');

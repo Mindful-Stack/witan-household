@@ -17,9 +17,11 @@ knowledge/
 │                 (_context-map, _glossary, _journeys, _domain-questions)
 ├── frameworks/   per-framework patterns, review checklists, conventions (one subdir per framework)
 ├── languages/    per-language code style, error handling, review checklists (one subdir per language)
-├── learnings/    captured gotchas / tribal knowledge worth remembering
-└── _index.json   generated retrieval index — do NOT hand-edit (run `make build-index`)
+└── learnings/    captured gotchas / tribal knowledge worth remembering
 ```
+
+There is no generated index. Retrieval greps frontmatter directly (`^(title|description|tags):`),
+so a node is searchable the moment it is written — nothing to rebuild.
 
 Each category ships with a `_starter.md` placeholder — replace it with real nodes as the workspace matures.
 
@@ -27,7 +29,10 @@ Each category ships with a `_starter.md` placeholder — replace it with real no
 
 - Each node is a markdown file with YAML frontmatter: `title`, `description` (≤300 chars), and `tags`
   (an **inline** array, e.g. `[a, b]`).
-- `_`-prefixed files and folders are meta (context maps, glossaries, logs) — excluded from the index.
+- Keep every frontmatter value **inline on its own line** — retrieval greps `^title:`,
+  `^description:`, `^tags:`, so a value wrapped onto following lines (a `>` / `|` block scalar, or
+  a block `tags:` list) is invisible to search. `make validate` fails on this.
+- `_`-prefixed files and folders are meta (context maps, glossaries, logs) — skipped by validation.
 - Cross-link nodes with `[[wikilinks]]` (the node path without `.md`, relative to `knowledge/`).
 - Document the **durable standard / model**, not transient work. Keep nodes atomic and scannable, so a
   reader (human or agent) can load one node and answer "what is this, how is it used, what's contested?"
@@ -36,9 +41,8 @@ Each category ships with a `_starter.md` placeholder — replace it with real no
 
 The `_tools/` CLI is wired into the workspace `Makefile`. From the workspace root:
 
-- `make build-index` — rebuild `knowledge/_index.json`
-- `make validate` — check frontmatter + wikilinks
-- `make doctor` — full diagnostic (manifest, siblings, frontmatter, links, orphans)
+- `make validate` — check frontmatter (present + inline), wikilinks, orphans, and tag health
+- `make doctor` — full diagnostic (manifest, siblings, frontmatter, links, orphans, tag health)
 
 ## Where to start (new contributor)
 

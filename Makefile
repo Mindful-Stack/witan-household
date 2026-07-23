@@ -1,8 +1,8 @@
-.PHONY: help split-lore rename build-index validate doctor test
+.PHONY: help split-lore rename validate doctor test
 
 # The KB directory name comes from household.json's `knowledge_base` field
 # (default: lore). This lets a household rename its knowledge base without
-# editing this Makefile — the build-index/validate/doctor/test targets follow.
+# editing this Makefile — the validate/doctor/test targets follow.
 KB_DIR := $(shell node -e "try{process.stdout.write(String(require('./household.json').knowledge_base||'lore'))}catch(e){process.stdout.write('lore')}" 2>/dev/null)
 # Guard the empty case (e.g. node absent → stdout empty) so paths never become /_tools/...
 ifeq ($(strip $(KB_DIR)),)
@@ -20,10 +20,7 @@ help:    ## List targets, grouped by section
 include scripts/Makefile.shared
 
 ##@ Knowledge base
-build-index: ## Rebuild <kb>/knowledge/_index.json
-	@node $(KB_DIR)/_tools/cli.js build-index --dir $(KB_DIR)/knowledge
-
-validate: ## Run KB validators (frontmatter, links, orphans)
+validate: ## Run KB validators (frontmatter, links, orphans, tag health)
 	@node $(KB_DIR)/_tools/cli.js validate --dir $(KB_DIR)/knowledge
 
 doctor:  ## Run full workspace + KB diagnostic

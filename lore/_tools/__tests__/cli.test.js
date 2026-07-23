@@ -62,6 +62,22 @@ function writeValidMd(dir, relativePath, extra = '') {
   ].join('\n'));
 }
 
+// Write a node with explicit frontmatter fields (tags as an inline array).
+function writeMd(dir, relativePath, { title, description, tags }) {
+  const fullPath = path.join(dir, relativePath);
+  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+  fs.writeFileSync(fullPath, [
+    '---',
+    `title: ${title}`,
+    `description: ${description}`,
+    `tags: [${tags.join(', ')}]`,
+    '---',
+    '',
+    '# Content',
+    '',
+  ].join('\n'));
+}
+
 function cleanup(tmpDir) {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }
@@ -74,8 +90,7 @@ describe('CLI help', () => {
     assert.equal(result.exitCode, 0);
     assert.ok(result.stdout.includes('Usage:'), 'Should show usage');
     assert.ok(result.stdout.includes('validate'), 'Should mention validate');
-    assert.ok(result.stdout.includes('build-index'), 'Should mention build-index');
-    assert.ok(result.stdout.includes('check-index'), 'Should mention check-index');
+    assert.ok(result.stdout.includes('doctor'), 'Should mention doctor');
   });
 
   it('shows help with "help" command', () => {
@@ -289,9 +304,9 @@ describe('CLI validate --orphans', () => {
   });
 });
 
-// --- build-index command ---
+// --- retired index commands ---
 
-describe('CLI build-index', () => {
+describe('CLI retired index commands', () => {
   let tmpDir, knowledgeDir;
 
   beforeEach(() => {
@@ -302,35 +317,28 @@ describe('CLI build-index', () => {
 
   afterEach(() => cleanup(tmpDir));
 
-  it('generates _index.json and exits 0', () => {
+  // Retrieval greps frontmatter directly; there is no index to build or check.
+  for (const gone of ['build-index', 'check-index']) {
+    it(`rejects the removed '${gone}' command`, () => {
+      const result = runCli(`${gone} --dir "${knowledgeDir}"`);
+      assert.equal(result.exitCode, 1);
+      assert.ok(
+        result.stderr.includes('Unknown command') || result.stdout.includes('Unknown command'),
+        `${gone} should be an unknown command`
+      );
+    });
+  }
+
+  it('never writes an _index.json', () => {
     writeValidMd(knowledgeDir, 'test-node.md');
-
-    const result = runCli(`build-index --dir "${knowledgeDir}"`);
-    assert.equal(result.exitCode, 0);
-    assert.ok(result.stdout.includes('[OK]'));
-
-    const indexPath = path.join(knowledgeDir, '_index.json');
-    assert.ok(fs.existsSync(indexPath), '_index.json should be created');
-
-    const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-    assert.equal(index.total, 1);
-    assert.equal(index.nodes[0].path, 'test-node');
-  });
-
-  it('exits 1 if knowledge directory does not exist', () => {
-    const badDir = path.join(tmpDir, 'nonexistent', 'knowledge');
-    const result = runCli(`build-index --dir "${badDir}"`);
-    assert.equal(result.exitCode, 1);
-    assert.ok(
-      result.stdout.includes('not found') || result.stdout.includes('does not exist') ||
-      result.stderr.includes('not found') || result.stderr.includes('does not exist')
-    );
+    runCli(`validate --dir "${knowledgeDir}"`);
+    assert.ok(!fs.existsSync(path.join(knowledgeDir, '_index.json')), 'no index should be generated');
   });
 });
 
-// --- check-index command ---
+// --- tag health (informational) ---
 
-describe('CLI check-index', () => {
+describe('CLI validate — tag health', () => {
   let tmpDir, knowledgeDir;
 
   beforeEach(() => {
@@ -341,33 +349,13 @@ describe('CLI check-index', () => {
 
   afterEach(() => cleanup(tmpDir));
 
-  it('exits 0 when index is up to date', () => {
-    writeValidMd(knowledgeDir, 'test-node.md');
+  it('reports near-duplicate tags as info without failing', () => {
+    writeMd(knowledgeDir, 'a.md', { title: 'A', description: 'a', tags: ['error', 'shared'] });
+    writeMd(knowledgeDir, 'b.md', { title: 'B', description: 'b', tags: ['errors', 'shared'] });
 
-    // Build the index first
-    runCli(`build-index --dir "${knowledgeDir}"`);
-
-    const result = runCli(`check-index --dir "${knowledgeDir}"`);
-    assert.equal(result.exitCode, 0);
-    assert.ok(result.stdout.includes('[OK]'));
-  });
-
-  it('exits 1 when index is stale', () => {
-    writeValidMd(knowledgeDir, 'test-node.md');
-
-    // Build the index, then add a new file
-    runCli(`build-index --dir "${knowledgeDir}"`);
-    writeValidMd(knowledgeDir, 'new-node.md');
-
-    const result = runCli(`check-index --dir "${knowledgeDir}"`);
-    assert.equal(result.exitCode, 1);
-    assert.ok(result.stdout.includes('[FAIL]') || result.stdout.includes('stale'));
-  });
-
-  it('exits 1 when _index.json does not exist', () => {
-    writeValidMd(knowledgeDir, 'test-node.md');
-
-    const result = runCli(`check-index --dir "${knowledgeDir}"`);
-    assert.equal(result.exitCode, 1);
+    const result = runCli(`validate --dir "${knowledgeDir}"`);
+    assert.equal(result.exitCode, 0, 'tag drift is informational, must not fail');
+    assert.ok(result.stdout.includes('[INFO]'), 'should emit an info line');
+    assert.ok(result.stdout.includes('error~errors'), 'should name the near-duplicate pair');
   });
 });
