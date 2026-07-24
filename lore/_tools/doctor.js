@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { validateAll: validateFrontmatter } = require('./validate-frontmatter');
+const { validateAll: validateFrontmatter, tagHealth } = require('./validate-frontmatter');
 const { validateAll: validateLinks } = require('./validate-links');
 const { findOrphans } = require('./check-orphans');
 
@@ -26,7 +26,11 @@ function runDoctor(knowledgeDir, options = {}) {
         issues.error.push(`Knowledge dir not found at ${knowledgeDir}`);
         return reportAndExit(issues);
     }
-    checkIndexStaleness(knowledgeDir, issues);
+    try {
+        checkTagHealth(knowledgeDir, issues);
+    } catch (e) {
+        issues.warning.push(`Tag-health check crashed: ${e.message}`);
+    }
     try {
         // validateFrontmatter returns { [relPath]: [errorMsg, ...] }
         const frontmatterErrors = validateFrontmatter(knowledgeDir);
@@ -103,26 +107,21 @@ function checkManifest(manifestPath, issues) {
     }
 }
 
-function checkIndexStaleness(knowledgeDir, issues) {
-    const indexPath = path.join(knowledgeDir, '_index.json');
-    if (!fs.existsSync(indexPath)) {
-        issues.warning.push('_index.json missing — run `make build-index` for fast lookups.');
-        return;
+// Tag health is informational only: retrieval greps tags directly, so the KB's
+// tags ARE its vocabulary — there is no allow-list to be stale against. Surfaces
+// singletons (can't cluster) and near-duplicate pairs (likely drift) for a human
+// glance; never an error. Reported via issues.info, which does not affect exit code.
+function checkTagHealth(knowledgeDir, issues) {
+    const health = tagHealth(knowledgeDir);
+    if (health.nearDuplicates.length > 0) {
+        const pairs = health.nearDuplicates.map(([a, b]) => `${a}~${b}`).join(', ');
+        issues.info.push(`Tags: ${health.nearDuplicates.length} near-duplicate pair(s) — likely drift: ${pairs}`);
     }
-    const indexMtime = fs.statSync(indexPath).mtimeMs;
-    let staleFiles = 0;
-    const walk = (dir) => {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) walk(full);
-            else if (entry.isFile() && entry.name.endsWith('.md')) {
-                if (fs.statSync(full).mtimeMs > indexMtime) staleFiles++;
-            }
-        }
-    };
-    walk(knowledgeDir);
-    if (staleFiles > 0) {
-        issues.warning.push(`_index.json is older than ${staleFiles} .md file(s) — run \`make build-index\`.`);
+    if (health.singletons.length > 0) {
+        issues.info.push(
+            `Tags: ${health.singletons.length}/${health.distinctTags} used once (can't cluster). ` +
+            `Prefer reusing an existing tag where one fits.`
+        );
     }
 }
 
@@ -135,6 +134,7 @@ function reportAndExit(issues) {
         for (const e of issues.error) lines.push(`  ✗ ${e}`);
         for (const w of issues.warning) lines.push(`  ⚠ ${w}`);
     }
+    for (const i of issues.info) lines.push(`  ℹ ${i}`);
     lines.push('');
     lines.push(`Summary: ${issues.error.length} error(s), ${issues.warning.length} warning(s).`);
     console.log(lines.join('\n'));

@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const { parseFrontmatter, validateFile, validateAll } = require('../validate-frontmatter');
+const { parseFrontmatter, validateFile, validateAll, blockScalarFields, tagHealth, areNearDuplicates } = require('../validate-frontmatter');
 
 // --- parseFrontmatter ---
 
@@ -316,5 +316,138 @@ describe('validateAll', () => {
     } finally {
       teardown();
     }
+  });
+});
+
+// --- inline-frontmatter requirement (the retrieval-critical guard) ---
+
+describe('block-scalar detection', () => {
+  const inline = [
+    '---',
+    'title: A Title',
+    'description: One line',
+    'tags: [a, b]',
+    '---',
+    '',
+    '# Body',
+  ].join('\n');
+
+  it('inline scalars produce no block-scalar findings', () => {
+    assert.deepEqual(blockScalarFields(inline), []);
+  });
+
+  it('folded description (>) is flagged', () => {
+    const content = [
+      '---',
+      'title: A Title',
+      'description: >',
+      '  wrapped over',
+      '  two lines',
+      'tags: [a]',
+      '---',
+      '',
+      '# Body',
+    ].join('\n');
+    assert.deepEqual(blockScalarFields(content), ['description']);
+    const errors = validateFile(content, 'x.md');
+    assert.ok(errors.some((e) => e.includes('block scalar') && e.includes('description')));
+  });
+
+  it('literal title (|) is flagged, and is an error, not just a warning', () => {
+    const content = [
+      '---',
+      'title: |',
+      '  multi',
+      'description: fine',
+      'tags: [a]',
+      '---',
+      '',
+      '# Body',
+    ].join('\n');
+    assert.deepEqual(blockScalarFields(content), ['title']);
+    assert.ok(validateFile(content, 'x.md').length > 0);
+  });
+
+  it('a block LIST of tags fails (must be an inline list)', () => {
+    const content = [
+      '---',
+      'title: A',
+      'description: fine',
+      'tags:',
+      '  - a',
+      '  - b',
+      '---',
+      '',
+      '# Body',
+    ].join('\n');
+    const errors = validateFile(content, 'x.md');
+    assert.ok(errors.some((e) => e.toLowerCase().includes('inline list')));
+  });
+
+  it('does not false-positive on a description containing > mid-text', () => {
+    const content = [
+      '---',
+      'title: A',
+      'description: uses a > b comparison inline',
+      'tags: [a]',
+      '---',
+      '',
+      '# Body',
+    ].join('\n');
+    assert.deepEqual(blockScalarFields(content), []);
+    assert.deepEqual(validateFile(content, 'x.md'), []);
+  });
+});
+
+// --- tag health (informational, dynamic vocabulary) ---
+
+describe('areNearDuplicates', () => {
+  it('flags simple plurals', () => {
+    assert.equal(areNearDuplicates('error', 'errors'), true);
+    assert.equal(areNearDuplicates('guideline', 'guidelines'), true);
+  });
+  it('flags separator drift', () => {
+    assert.equal(areNearDuplicates('ef-core', 'efcore'), true);
+  });
+  it('does not flag distinct tech tags one edit apart (precision over recall)', () => {
+    // The reason generic edit-distance was dropped: these are all distinct.
+    assert.equal(areNearDuplicates('xunit', 'nunit'), false);
+    assert.equal(areNearDuplicates('jest', 'rest'), false);
+    assert.equal(areNearDuplicates('dotnet', 'dotnet9'), false);
+  });
+  it('does not flag genuinely different tags', () => {
+    assert.equal(areNearDuplicates('security', 'testing'), false);
+  });
+});
+
+describe('tagHealth', () => {
+  const os = require('os');
+  function setup(files) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-tags-'));
+    for (const [name, tags] of Object.entries(files)) {
+      fs.writeFileSync(path.join(tmp, name), [
+        '---', 'title: T', 'description: d', `tags: [${tags.join(', ')}]`, '---', '', '# B',
+      ].join('\n'));
+    }
+    return tmp;
+  }
+
+  it('counts singletons and distinct tags', () => {
+    const dir = setup({ 'a.md': ['shared', 'once'], 'b.md': ['shared'] });
+    const h = tagHealth(dir);
+    assert.equal(h.distinctTags, 2);
+    assert.deepEqual(h.singletons, ['once']);
+  });
+
+  it('reports near-duplicate pairs', () => {
+    const dir = setup({ 'a.md': ['error'], 'b.md': ['errors'] });
+    const h = tagHealth(dir);
+    assert.deepEqual(h.nearDuplicates, [['error', 'errors']]);
+  });
+
+  it('skips _-prefixed files', () => {
+    const dir = setup({ '_starter.md': ['ghost'], 'a.md': ['real'] });
+    const h = tagHealth(dir);
+    assert.ok(!h.singletons.includes('ghost'));
   });
 });
