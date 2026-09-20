@@ -3,8 +3,56 @@ const path = require('path');
 
 const WIKILINK_PATTERN = /\[\[([^\]]+)\]\]/g;
 
+// A fence opens with ``` or ~~~ at up to three spaces of indent, and closes only with the same
+// character and at least as many of them (CommonMark 4.5). Tracking the opening marker matters:
+// a node documenting markdown itself can carry a ~~~ line inside a ``` block, and a naive toggle
+// would read that as a close and expose the rest of the file as prose.
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
+
+// An inline code span on one line: `[[ -L $2 ]]`, ``[[ x ]]``. The delimiters must be equal-length
+// backtick runs, so a lone stray backtick in prose matches nothing and leaves the line alone.
+const INLINE_CODE = /(`+)[^`\n]*\1/g;
+
 /**
- * Extract all wikilinks from markdown content.
+ * Blank out fenced code blocks and inline code spans, keeping the line structure intact.
+ *
+ * Knowledge nodes document shell, where `[[ $x == "$y" ]]` is a conditional and not a wikilink.
+ * Scanning raw content reports every such conditional as a broken link, which makes a bash
+ * standard impossible to write down — the validator fails on correct documentation.
+ *
+ * Indented (four-space) code blocks are deliberately NOT stripped. Continuation lines of a nested
+ * list are indented just as far, so treating indentation as code would silently drop real
+ * wikilinks — a false negative, which is worse here than the false positive this fixes.
+ *
+ * @param {string} content - Markdown file content
+ * @returns {string} The content with every code span replaced by blanks
+ */
+function stripCode(content) {
+  let fence = null; // the opening marker while inside a fenced block, e.g. '```'
+
+  return content
+    .split('\n')
+    .map((line) => {
+      const opener = line.match(FENCE_LINE);
+
+      if (opener) {
+        const marker = opener[1];
+        if (fence === null) {
+          fence = marker;
+        } else if (marker[0] === fence[0] && marker.length >= fence.length) {
+          fence = null;
+        }
+        // Either way the fence line itself is never prose.
+        return '';
+      }
+
+      return fence === null ? line.replace(INLINE_CODE, '') : '';
+    })
+    .join('\n');
+}
+
+/**
+ * Extract all wikilinks from markdown content, ignoring anything inside code.
  *
  * @param {string} content - Markdown file content
  * @returns {string[]} Array of wikilink targets (text inside [[ ]])
@@ -12,7 +60,8 @@ const WIKILINK_PATTERN = /\[\[([^\]]+)\]\]/g;
 function extractLinks(content) {
   const matches = [];
   let match;
-  while ((match = WIKILINK_PATTERN.exec(content)) !== null) {
+  const prose = stripCode(content);
+  while ((match = WIKILINK_PATTERN.exec(prose)) !== null) {
     matches.push(match[1]);
   }
   // Reset lastIndex since the regex is global
@@ -142,4 +191,4 @@ function validateAll(knowledgeDir) {
   return allBroken;
 }
 
-module.exports = { extractLinks, resolveLink, validateAll };
+module.exports = { stripCode, extractLinks, resolveLink, validateAll };
