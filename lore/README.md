@@ -11,6 +11,8 @@ kept tool-native for the [Lorekeeper](https://github.com/Mindful-Stack/witan) pl
 
 ```
 knowledge/
+├── adrs/         architecture decision records — numbered, one decision each, immutable once
+│                 accepted (see "ADRs" below)
 ├── general/      cross-cutting standards & conventions — code review, security, testing,
 │                 workflow, architecture, observability…
 ├── domain/       the DDD bounded-context model — one node per context, plus meta files
@@ -36,6 +38,26 @@ Each category ships with a `_starter.md` placeholder — replace it with real no
 - Cross-link nodes with `[[wikilinks]]` (the node path without `.md`, relative to `knowledge/`).
 - Document the **durable standard / model**, not transient work. Keep nodes atomic and scannable, so a
   reader (human or agent) can load one node and answer "what is this, how is it used, what's contested?"
+
+## ADRs
+
+`adrs/` holds architecture decision records: the hard-to-reverse choices (framework, storage,
+auth, API contract, integration pattern, data model) and the reasoning behind them. Lorekeeper
+writes and lists them with `/lore:adr`; the shape is Nygard's *Context / Decision / Consequences*
+with a short *Considered options* list and an *Assumptions and invalidation triggers* section.
+
+- One decision per record, named `NNNN-<topic>.md` — four digits, zero-padded, never reused. The
+  filename names the **problem**, not the chosen answer, so it stays honest if the decision is
+  later superseded.
+- Frontmatter carries `status` (`proposed | accepted | rejected | deprecated | superseded`),
+  `date`, `deciders`, `confidence` (`high | medium | low`), and the usual `title` / `description` /
+  `tags`. The `description` is the decision in one sentence: it is what listings show.
+- A record stays `proposed` while nothing is built on it and may be amended freely. It flips to
+  `accepted` when the first code depends on it and is immutable from then on: to change the
+  decision, write a new record that supersedes it.
+- There is no index file. `/lore:adr list` (or `/lore:explore adrs`) renders one from frontmatter.
+
+`_starter.md` shows the full shape; copy it rather than writing from memory.
 
 ## Tooling
 
