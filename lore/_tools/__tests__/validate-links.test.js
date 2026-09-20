@@ -66,14 +66,63 @@ describe('stripCode', () => {
     assert.equal(stripCode(content).split('\n').length, 5);
   });
 
-  it('treats an unclosed fence as running to end of file', () => {
+  it('treats an unclosed fence as prose rather than swallowing the rest of the file', () => {
+    // A deliberate departure from CommonMark. A lone opener is more often a misread line than a
+    // real unterminated block, and running to EOF would hide every link after it.
     const content = ['Intro [[before]].', '```', '[[ after ]]'].join('\n');
-    assert.deepEqual(extractLinks(content), ['before']);
+    assert.deepEqual(extractLinks(content), ['before', ' after ']);
+  });
+
+  it('keeps a link after a fenced block nested in a list item', () => {
+    // The opener is indented past the fence column, so it is not recognised; bounding the damage
+    // is what stops the rest of the file disappearing.
+    const closed = ['- ```', '  code', '  ```', 'See [[real-node]].'].join('\n');
+    assert.ok(extractLinks(closed).includes('real-node'));
+    const unclosed = ['- item', '  ```', '  code', '', 'See [[real-node]].'].join('\n');
+    assert.ok(extractLinks(unclosed).includes('real-node'));
+  });
+
+  it('does not let trailing text close a fence', () => {
+    // '```not-a-close' is content; the bare fence after it is the real close.
+    const content = ['```', '```not-a-close', '```', 'See [[real-node]].'].join('\n');
+    assert.deepEqual(extractLinks(content), ['real-node']);
+  });
+
+  it('does not open a backtick fence whose info string contains a backtick', () => {
+    const content = ['```foo`bar', 'See [[real-node]].'].join('\n');
+    assert.ok(extractLinks(content).includes('real-node'));
+  });
+
+  it('leaves unbalanced backtick runs as prose', () => {
+    // One backtick cannot be closed by two, so this is literal text and the link is real.
+    assert.deepEqual(extractLinks('`[[real-node]]``'), ['real-node']);
+  });
+
+  it('does not let an escaped backtick open a code span', () => {
+    assert.deepEqual(extractLinks('\\`[[real-node]]`'), ['real-node']);
+  });
+
+  it('closes a span on an equal-length run, skipping shorter runs inside it', () => {
+    assert.deepEqual(extractLinks('``[[nope]] ` x``'), []);
   });
 
   it('leaves a lone stray backtick in prose alone', () => {
     const content = 'A stray ` backtick and a [[real-node]] link.';
     assert.deepEqual(extractLinks(content), ['real-node']);
+  });
+
+  it('still reports a wikilink inside an indented code block — a known limitation', () => {
+    // Four spaces or a tab makes this an indented code block, not a fence (CommonMark 4.4), and
+    // indented blocks are not stripped. Pinned so the trade-off is visible rather than surprising.
+    const fourSpace = ['    ```', '    [[ $x ]]', '    ```', 'See [[real-node]].'].join('\n');
+    assert.deepEqual(extractLinks(fourSpace), [' $x ', 'real-node']);
+    const tabbed = ['\t```', '[[ $x ]]', '\t```', 'See [[real-node]].'].join('\n');
+    assert.deepEqual(extractLinks(tabbed), [' $x ', 'real-node']);
+  });
+
+  it('does not count a wikilink inside a fence as an inbound link (check-orphans shares this)', () => {
+    const content = ['Example of the syntax:', '```markdown', '[[some-node]]', '```'].join('\n');
+    assert.deepEqual(extractLinks(content), []);
   });
 
   it('does not strip indented text, so a nested list item keeps its wikilink', () => {

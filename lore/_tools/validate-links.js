@@ -3,52 +3,146 @@ const path = require('path');
 
 const WIKILINK_PATTERN = /\[\[([^\]]+)\]\]/g;
 
-// A fence opens with ``` or ~~~ at up to three spaces of indent, and closes only with the same
-// character and at least as many of them (CommonMark 4.5). Tracking the opening marker matters:
-// a node documenting markdown itself can carry a ~~~ line inside a ``` block, and a naive toggle
-// would read that as a close and expose the rest of the file as prose.
-const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
+// A fence line: up to three spaces of indent, then a run of at least three backticks or tildes,
+// then the info string (openers) or trailing junk (which disqualifies a closer).
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
-// An inline code span on one line: `[[ -L $2 ]]`, ``[[ x ]]``. The delimiters must be equal-length
-// backtick runs, so a lone stray backtick in prose matches nothing and leaves the line alone.
-const INLINE_CODE = /(`+)[^`\n]*\1/g;
+/**
+ * Find the line ranges covered by fenced code blocks, as inclusive [start, end] pairs.
+ *
+ * Only a block whose opener AND closer are both visible is reported. CommonMark says an unclosed
+ * fence runs to the end of the document, and this deliberately does not: a lone opener is far more
+ * often a line this scanner misread than a real unterminated block, and swallowing the rest of the
+ * file would hide every wikilink after it. Reporting a link that turns out to be code is a noisy
+ * failure someone fixes; silently passing a broken link is the one that ships.
+ *
+ * @param {string[]} lines - The file split on newlines
+ * @returns {Array<[number, number]>} Inclusive line ranges to blank
+ */
+function fenceRegions(lines) {
+  const regions = [];
+  let open = null;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].replace(/\r$/, '').match(FENCE_LINE);
+    if (!match) continue;
+
+    const [, marker, rest] = match;
+
+    if (open === null) {
+      // A backtick fence's info string may not itself contain a backtick, so this is not an opener.
+      if (marker[0] === '`' && rest.includes('`')) continue;
+      open = { start: i, marker };
+      continue;
+    }
+
+    // A closer matches the opening character, is at least as long, and carries nothing but space.
+    const closes =
+      marker[0] === open.marker[0] && marker.length >= open.marker.length && /^\s*$/.test(rest);
+    if (closes) {
+      regions.push([open.start, i]);
+      open = null;
+    }
+    // Otherwise this is ordinary content inside the block — a shorter fence, or one with trailing
+    // text, neither of which closes anything.
+  }
+
+  return regions; // an unterminated `open` is dropped on purpose; see above
+}
+
+/**
+ * Blank the inline code spans in a single line, preserving its length.
+ *
+ * A span is a run of backticks closed by a run of exactly the same length (CommonMark 6.1). Runs
+ * that never find their match are literal text and are left alone, which is what keeps
+ * `` `[[node]]`` `` — unbalanced, therefore prose — from losing its link. A backslash-escaped
+ * backtick cannot open a span.
+ *
+ * @param {string} line - One line of markdown
+ * @returns {string} The line with code spans replaced by spaces
+ */
+function stripInlineCode(line) {
+  const runAt = (from, want) => {
+    let i = from;
+    while (i < line.length) {
+      if (line[i] !== '`') {
+        i += 1;
+        continue;
+      }
+      let len = 0;
+      while (line[i + len] === '`') len += 1;
+      if (len === want) return i;
+      i += len;
+    }
+    return -1;
+  };
+
+  let out = '';
+  let i = 0;
+
+  while (i < line.length) {
+    if (line[i] === '\\') {
+      out += line.slice(i, i + 2); // an escaped character, backtick included, is literal
+      i += 2;
+      continue;
+    }
+
+    if (line[i] !== '`') {
+      out += line[i];
+      i += 1;
+      continue;
+    }
+
+    let len = 0;
+    while (line[i + len] === '`') len += 1;
+
+    const close = runAt(i + len, len);
+    if (close === -1) {
+      out += line.slice(i, i + len); // unmatched run: literal backticks, not a delimiter
+      i += len;
+      continue;
+    }
+
+    out += ' '.repeat(close + len - i);
+    i = close + len;
+  }
+
+  return out;
+}
 
 /**
  * Blank out fenced code blocks and inline code spans, keeping the line structure intact.
  *
  * Knowledge nodes document shell, where `[[ $x == "$y" ]]` is a conditional and not a wikilink.
  * Scanning raw content reports every such conditional as a broken link, which makes a bash
- * standard impossible to write down — the validator fails on correct documentation.
+ * standard impossible to write down — correct documentation fails the validator.
  *
- * Indented (four-space) code blocks are deliberately NOT stripped. Continuation lines of a nested
- * list are indented just as far, so treating indentation as code would silently drop real
- * wikilinks — a false negative, which is worse here than the false positive this fixes.
+ * Two deliberate departures from CommonMark, both chosen so a misread never hides a real link:
+ * an unclosed fence is treated as prose rather than running to EOF (see fenceRegions), and a code
+ * span is confined to one line, so a rare multi-line span may still expose its contents.
+ *
+ * Indented (four-space) code blocks are NOT stripped either. Continuation lines of a nested list
+ * are indented just as far, so treating indentation as code would silently drop real wikilinks.
+ * The known cost: a fence indented four spaces, or by a tab, is an indented block rather than a
+ * fence, so a wikilink-shaped string inside one is still reported. Tests pin this.
+ *
+ * Note the blast radius: check-orphans.js shares extractLinks, so this also stops a wikilink
+ * written inside a code sample from counting as an inbound link. That is the intended reading —
+ * demonstrating the syntax is not referencing the node — but it can newly orphan a node whose
+ * only inbound link lived in a fence.
  *
  * @param {string} content - Markdown file content
  * @returns {string} The content with every code span replaced by blanks
  */
 function stripCode(content) {
-  let fence = null; // the opening marker while inside a fenced block, e.g. '```'
+  const lines = content.split('\n');
+  const fenced = new Set();
 
-  return content
-    .split('\n')
-    .map((line) => {
-      const opener = line.match(FENCE_LINE);
+  for (const [start, end] of fenceRegions(lines)) {
+    for (let i = start; i <= end; i += 1) fenced.add(i);
+  }
 
-      if (opener) {
-        const marker = opener[1];
-        if (fence === null) {
-          fence = marker;
-        } else if (marker[0] === fence[0] && marker.length >= fence.length) {
-          fence = null;
-        }
-        // Either way the fence line itself is never prose.
-        return '';
-      }
-
-      return fence === null ? line.replace(INLINE_CODE, '') : '';
-    })
-    .join('\n');
+  return lines.map((line, i) => (fenced.has(i) ? '' : stripInlineCode(line))).join('\n');
 }
 
 /**
