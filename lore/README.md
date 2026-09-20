@@ -53,8 +53,13 @@ with a short *Considered options* list and an *Assumptions and invalidation trig
   `date`, `deciders`, `confidence` (`high | medium | low`), and the usual `title` / `description` /
   `tags`. The `description` is the decision in one sentence: it is what listings show.
 - A record stays `proposed` while nothing is built on it and may be amended freely. It flips to
-  `accepted` when the first code depends on it and is immutable from then on: to change the
-  decision, write a new record that supersedes it.
+  `accepted` when the first code depends on it, and that **locks** it. From then on the only
+  permitted edits are an appended `## Status` line (alone, or with a later transition to
+  `superseded` or `deprecated`), `superseded_by`, and repairs to a broken `[[wikilink]]`. A locked
+  record never returns to `proposed`.
+- To change a locked decision, write a new record that supersedes it. The old record stays
+  `accepted` and binding until the replacement is *accepted*, so there is never a moment when
+  neither constrains the code.
 - There is no index file. `/lore:adr list` (or `/lore:explore adrs`) renders one from frontmatter.
 
 `_starter.md` shows the full shape; copy it rather than writing from memory.
