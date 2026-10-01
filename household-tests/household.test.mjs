@@ -102,6 +102,16 @@ describe('household.json (per-repo shape)', () => {
         );
       });
 
+      it('branchProtection.allowBypass (if set) is boolean false', () => {
+        if (repo.branchProtection === undefined) return;
+        if (!('allowBypass' in repo.branchProtection)) return; // opt-out only
+        const v = repo.branchProtection.allowBypass;
+        assert.equal(
+          v, false,
+          `allowBypass is an opt-out flag: omit it rather than setting ${JSON.stringify(v)}`,
+        );
+      });
+
       it('teamAccess (if set) is a valid shape', () => {
         if (!('teamAccess' in repo)) return; // optional / unmanaged
         const errors = validateTeamAccessShape(repo.teamAccess);

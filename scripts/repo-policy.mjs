@@ -163,9 +163,12 @@ export const PERMISSION_API = {
  *   configured bypass team, or null/undefined when no bypass team is
  *   configured (the ruleset then carries no bypass actors).
  * @param {string|null} [opts.requiredStatusCheck] - optional status-check context name.
+ * @param {boolean} [opts.allowBypass=true] - false drops the bypass team from this
+ *   repo's ruleset, so nobody can merge around review. Set per repo via
+ *   household.json `branchProtection.allowBypass`.
  * @returns {object} Ruleset JSON ready to POST/PUT.
  */
-export function buildRuleset({ bypassTeamId, requiredStatusCheck = null }) {
+export function buildRuleset({ bypassTeamId, requiredStatusCheck = null, allowBypass = true }) {
   const rules = STANDARD_RULES.map(r => structuredClone(r));
   if (requiredStatusCheck) {
     rules.push({
@@ -184,13 +187,57 @@ export function buildRuleset({ bypassTeamId, requiredStatusCheck = null }) {
     conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
     rules,
     // The rulesets API accepts an empty bypass_actors array (no bypass =
-    // strictest); used when no bypass team is configured in household.json.
-    bypass_actors: bypassTeamId == null
+    // strictest); used when no bypass team is configured or the repo opts out.
+    bypass_actors: bypassTeamId == null || !allowBypass
       ? []
       : [
           { actor_id: bypassTeamId, actor_type: 'Team', bypass_mode: 'pull_request' },
         ],
   };
+}
+
+/**
+ * Read a repo's `branchProtection.allowBypass`, defaulting to true when absent.
+ * Throws on a non-boolean: a typo like "false" (a string) must not silently
+ * leave the bypass team in place on a repo that meant to opt out.
+ *
+ * @param {object|undefined} branchProtection
+ * @returns {boolean}
+ */
+export function resolveAllowBypass(branchProtection) {
+  if (!branchProtection || !('allowBypass' in branchProtection)) return true;
+  const v = branchProtection.allowBypass;
+  if (typeof v !== 'boolean') {
+    throw new Error(`branchProtection.allowBypass must be a boolean (got ${JSON.stringify(v)})`);
+  }
+  return v;
+}
+
+/**
+ * Fold a repo's observed protection back into its manifest `branchProtection` block
+ * (the `audit --write` re-baseline).
+ *
+ * Every field follows one rule: record what GitHub reports, but never strip a value the
+ * manifest already declares. The manifest is the statement of intent, so re-baselining
+ * between editing a policy and applying it must not silently revert the edit.
+ *
+ * @param {object} branchProtection - mutated in place.
+ * @param {object} observed
+ * @param {string|null} [observed.statusCheck]
+ * @param {boolean|null} [observed.bypassAllowed] - false when the repo has a ruleset
+ *   with no bypass actors while a bypass team is configured; null when unknown or moot.
+ * @returns {object} the same block, for chaining.
+ */
+export function applyInferredProtection(branchProtection, { statusCheck, bypassAllowed = null }) {
+  if (statusCheck) branchProtection.requiredStatusCheck = statusCheck;
+  else if (!('requiredStatusCheck' in branchProtection)) {
+    branchProtection.requiredStatusCheck = null;
+  }
+  // Opt-out flag: record only `false`, and never overwrite a declared value.
+  if (bypassAllowed === false && !('allowBypass' in branchProtection)) {
+    branchProtection.allowBypass = false;
+  }
+  return branchProtection;
 }
 
 /**
@@ -368,11 +415,14 @@ export function formatBypassActor(actor, teamSlugById) {
 
 /**
  * Render a list of bypass actors as a single comma-separated cell.
- * Returns "—" for an empty list (no bypass = strictest).
+ * Returns "—" for an empty list (no bypass = strictest). When the manifest
+ * opts the repo out (`allowBypass: false`) but GitHub still lists actors, the
+ * cell is flagged so the drift is visible in the audit table.
  */
-export function formatBypassActors(actors, teamSlugById) {
+export function formatBypassActors(actors, teamSlugById, { allowBypass = true } = {}) {
   if (!actors?.length) return '—';
-  return actors.map(a => formatBypassActor(a, teamSlugById)).join(', ');
+  const cell = actors.map(a => formatBypassActor(a, teamSlugById)).join(', ');
+  return allowBypass ? cell : `${cell} ⚠ manifest: none`;
 }
 
 /**
@@ -420,6 +470,21 @@ export function diffTeamAccess(declared, actual) {
     if (!(team in declared)) revokes.push({ team, level });
   }
   return { grants, changes, revokes };
+}
+
+/**
+ * Turn a team-access diff into the GitHub calls that reconcile it. A change
+ * (raise *or* lower) is a PUT at the declared level: GitHub's team-repo PUT
+ * sets the permission outright, so maintain → read really downgrades.
+ * @param {{grants:{team:string,level:string}[], changes:{team:string,from:string,to:string}[], revokes:{team:string,level:string}[]}} diff
+ * @returns {{kind:'grant'|'change'|'revoke', team:string, method:'PUT'|'DELETE', permission:string|null}[]}
+ */
+export function planTeamAccessOps(diff) {
+  return [
+    ...diff.grants.map(g => ({ kind: 'grant', team: g.team, method: 'PUT', permission: PERMISSION_API[g.level] })),
+    ...diff.changes.map(c => ({ kind: 'change', team: c.team, method: 'PUT', permission: PERMISSION_API[c.to] })),
+    ...diff.revokes.map(r => ({ kind: 'revoke', team: r.team, method: 'DELETE', permission: null })),
+  ];
 }
 
 export const TEAM_ACCESS_LEVELS = new Set(['read', 'triage', 'write', 'maintain', 'admin']);
@@ -700,7 +765,9 @@ async function cmdAudit({ write }) {
     const squash = tribool(r.squashOnly);
     const threads = tribool(r.threadResolution);
     const co = tribool(r.codeOwnerReview);
-    const bypassStr = formatBypassActors(r.bypassActors, teamSlugById);
+    let allowBypass = true;
+    try { allowBypass = resolveAllowBypass(r.repo.branchProtection); } catch { /* reported by apply */ }
+    const bypassStr = formatBypassActors(r.bypassActors, teamSlugById, { allowBypass });
     const delOnMerge = tribool(r.deleteBranchOnMerge);
     // Show GitHub repo name in parentheses when it differs from the manifest name
     const displayName = r.ghRepo && r.ghRepo !== r.repo.name
@@ -734,13 +801,15 @@ async function cmdAudit({ write }) {
     if (bypass && !bypass.cached) {
       manifest.branchProtection.bypassTeam.id = bypass.id;
     }
-    // Persist per-repo branchProtection.requiredStatusCheck.
+    // Persist per-repo branchProtection.requiredStatusCheck and allowBypass. A
+    // bypass opt-out is only inferable when a bypass team is configured and the
+    // repo has an active ruleset to read actors from.
     for (const r of results) {
       r.repo.branchProtection = r.repo.branchProtection || {};
-      if (r.statusCheck) r.repo.branchProtection.requiredStatusCheck = r.statusCheck;
-      else if (!('requiredStatusCheck' in r.repo.branchProtection)) {
-        r.repo.branchProtection.requiredStatusCheck = null;
-      }
+      applyInferredProtection(r.repo.branchProtection, {
+        statusCheck: r.statusCheck,
+        bypassAllowed: bypass && r.activeCount > 0 ? r.bypassActors.length > 0 : null,
+      });
     }
     // Bootstrap teamAccess for every repo from its current GitHub grants.
     for (const r of results) {
@@ -809,7 +878,10 @@ async function cmdApply(repoName, { dryRun, yes }) {
     console.error('(note: bypass team id not cached in household.json — run `audit --write` to persist)');
   }
   const requiredStatusCheck = repo.branchProtection?.requiredStatusCheck || null;
-  const desired = buildRuleset({ bypassTeamId: bypass?.id ?? null, requiredStatusCheck });
+  let allowBypass;
+  try { allowBypass = resolveAllowBypass(repo.branchProtection); }
+  catch (e) { console.error(`apply: ${repo.name}: ${e.message}`); process.exit(2); }
+  const desired = buildRuleset({ bypassTeamId: bypass?.id ?? null, requiredStatusCheck, allowBypass });
 
   // Fetch existing ruleset + repo meta in parallel
   const [list, repoMeta] = await Promise.all([
@@ -929,17 +1001,13 @@ async function cmdAccessApply(repoName, { dryRun, yes }) {
   // `audit`; it is not a failure. A DELETE that *does* error is a real problem
   // — auth/API/network — and is reported below, not swallowed.)
   const failures = [];
-  for (const g of diff.grants) {
-    try { await putTeamRepoPermission(org, g.team, org, ghRepo, PERMISSION_API[g.level]); }
-    catch (e) { failures.push(`grant ${g.team}=${g.level}: ${e.message}`); }
-  }
-  for (const c of diff.changes) {
-    try { await putTeamRepoPermission(org, c.team, org, ghRepo, PERMISSION_API[c.to]); }
-    catch (e) { failures.push(`change ${c.team}→${c.to}: ${e.message}`); }
-  }
-  for (const r of diff.revokes) {
-    try { await deleteTeamRepoAccess(org, r.team, org, ghRepo); }
-    catch (e) { failures.push(`revoke ${r.team}: ${e.message}`); }
+  for (const op of planTeamAccessOps(diff)) {
+    try {
+      if (op.method === 'DELETE') await deleteTeamRepoAccess(org, op.team, org, ghRepo);
+      else await putTeamRepoPermission(org, op.team, org, ghRepo, op.permission);
+    } catch (e) {
+      failures.push(`${op.kind} ${op.team}${op.permission ? `=${op.permission}` : ''}: ${e.message}`);
+    }
   }
 
   if (failures.length) {
@@ -956,7 +1024,9 @@ function help() {
       Inspect every repo in household.json; print state table.
       Entries without a "url" are inline directories and are skipped.
       With --write, populate each repo's branchProtection.requiredStatusCheck
-      from currently-required checks (bootstrap).
+      from currently-required checks (bootstrap), plus allowBypass: false where
+      GitHub shows no bypass actors. Declared values survive.
+      The Bypass column flags actors on a repo whose manifest opts out.
 
   ./scripts/repo-policy.mjs apply <repo> [--dry-run] [--yes]
       Apply the standard ruleset "${RULESET_NAME}" to one repo.
@@ -985,6 +1055,9 @@ Standard rules applied to every repo:
   - bypass (optional): team named in household.json branchProtection.bypassTeam
     (PR mode), e.g. {"bypassTeam": {"slug": "my-team"}}; when no bypass team
     is configured, the ruleset is applied with no bypass actors (strictest)
+  - allowBypass set per-repo from household.json[repo].branchProtection.allowBypass
+    (default true). false gives that repo's ruleset no bypass actors even when a
+    bypass team is configured — for repos where nobody may merge around review.
   - required_status_checks rule added per-repo from
     household.json[repo].branchProtection.requiredStatusCheck (if set)
 

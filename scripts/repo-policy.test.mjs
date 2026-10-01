@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   resolveOrg,
   buildRuleset,
+  applyInferredProtection,
   diffRulesets,
   diffRepoMeta,
   summarizeState,
@@ -15,6 +16,8 @@ import {
   normalizeTeamPermission,
   PERMISSION_API,
   diffTeamAccess,
+  planTeamAccessOps,
+  resolveAllowBypass,
   validateTeamAccessShape,
   formatTeamAccessActual,
   formatTeamAccessDrift,
@@ -105,6 +108,17 @@ describe('buildRuleset', () => {
     }
   });
 
+  it('emits empty bypass_actors when the repo opts out with allowBypass: false', () => {
+    const r = buildRuleset({ bypassTeamId: 9395036, allowBypass: false });
+    assert.deepEqual(r.bypass_actors, [], 'opted-out repo → nobody bypasses, even with a team configured');
+  });
+
+  it('keeps the team bypass when allowBypass is true or absent (existing repos unchanged)', () => {
+    const want = [{ actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.deepEqual(buildRuleset({ bypassTeamId: 9395036, allowBypass: true }).bypass_actors, want);
+    assert.deepEqual(buildRuleset({ bypassTeamId: 9395036 }).bypass_actors, want);
+  });
+
   it('appends required_status_checks when requiredStatusCheck is provided', () => {
     const r = buildRuleset({ bypassTeamId: 1, requiredStatusCheck: 'Build & Test' });
     const sc = r.rules.find(x => x.type === 'required_status_checks');
@@ -129,12 +143,58 @@ describe('buildRuleset', () => {
   });
 });
 
+// === applyInferredProtection ===
+
+describe('applyInferredProtection', () => {
+  it('records an observed status check', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: 'Build & Test' });
+    assert.deepEqual(bp, { requiredStatusCheck: 'Build & Test' });
+  });
+
+  it('fills a missing requiredStatusCheck with null', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null });
+    assert.deepEqual(bp, { requiredStatusCheck: null });
+  });
+
+  it('records allowBypass: false when GitHub shows a ruleset nobody can bypass', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: false });
+    assert.equal(bp.allowBypass, false);
+  });
+
+  it('leaves allowBypass absent when bypass is allowed (true is the default)', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: true });
+    assert.ok(!('allowBypass' in bp), 'no true written to repos on the default');
+  });
+
+  it('leaves allowBypass absent when the observation is unknown (null)', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: null });
+    assert.ok(!('allowBypass' in bp));
+  });
+
+  it('never strips a declared value that GitHub has not caught up to yet', () => {
+    const bp = { requiredStatusCheck: 'Build & Test', allowBypass: false };
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: true });
+    assert.deepEqual(bp, { requiredStatusCheck: 'Build & Test', allowBypass: false });
+  });
+});
+
 // === diffRulesets ===
 
 describe('diffRulesets', () => {
   function desired() {
     return buildRuleset({ bypassTeamId: 9395036, requiredStatusCheck: 'Build & Test' });
   }
+
+  it('flags removal of the team bypass when a repo opts out', () => {
+    const existing = buildRuleset({ bypassTeamId: 1 });
+    const d = buildRuleset({ bypassTeamId: 1, allowBypass: false });
+    assert.deepEqual(diffRulesets(existing, d), ['bypass_actors: [["Team",1,"pull_request"]] → []']);
+  });
 
   it('returns "no existing ruleset" when existing is null', () => {
     const diffs = diffRulesets(null, desired());
@@ -468,6 +528,41 @@ describe('formatBypassActors', () => {
     );
     assert.equal(out, 'my-team, admin (always)');
   });
+
+  it('flags actors on a repo whose manifest opts out of bypass', () => {
+    const actors = [{ actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.equal(formatBypassActors(actors, teams, { allowBypass: false }), 'my-team ⚠ manifest: none');
+  });
+
+  it('renders an opted-out repo with no actors as plain "—"', () => {
+    assert.equal(formatBypassActors([], teams, { allowBypass: false }), '—');
+  });
+
+  it('does not flag actors when bypass is allowed', () => {
+    const actors = [{ actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.equal(formatBypassActors(actors, teams, { allowBypass: true }), 'my-team');
+  });
+});
+
+// === resolveAllowBypass ===
+
+describe('resolveAllowBypass', () => {
+  it('defaults to true when the block or field is absent', () => {
+    assert.equal(resolveAllowBypass(undefined), true);
+    assert.equal(resolveAllowBypass({}), true);
+    assert.equal(resolveAllowBypass({ requiredStatusCheck: null }), true);
+  });
+
+  it('returns the declared boolean', () => {
+    assert.equal(resolveAllowBypass({ allowBypass: false }), false);
+    assert.equal(resolveAllowBypass({ allowBypass: true }), true);
+  });
+
+  it('rejects a non-boolean rather than silently granting bypass', () => {
+    for (const v of ['false', 0, null, 'no']) {
+      assert.throws(() => resolveAllowBypass({ allowBypass: v }), /allowBypass must be a boolean/);
+    }
+  });
 });
 
 // === formatRepos ===
@@ -625,6 +720,11 @@ describe('diffTeamAccess', () => {
       grants: [], changes: [{ team: 'sec', from: 'read', to: 'maintain' }], revokes: [],
     });
   });
+  it('reports a downgrade as a change, not a no-op', () => {
+    assert.deepEqual(diffTeamAccess({ ops: 'read' }, { ops: 'maintain' }), {
+      grants: [], changes: [{ team: 'ops', from: 'maintain', to: 'read' }], revokes: [],
+    });
+  });
   it('reports a revoke (with its actual level) for an undeclared team', () => {
     assert.deepEqual(diffTeamAccess({}, { qa: 'read' }), {
       grants: [], changes: [], revokes: [{ team: 'qa', level: 'read' }],
@@ -643,6 +743,28 @@ describe('diffTeamAccess', () => {
   });
   it('empty declared + empty actual = no changes', () => {
     assert.deepEqual(diffTeamAccess({}, {}), { grants: [], changes: [], revokes: [] });
+  });
+});
+
+// === planTeamAccessOps ===
+
+describe('planTeamAccessOps', () => {
+  it('turns a downgrade into a PUT at the lower API permission', () => {
+    const ops = planTeamAccessOps(diffTeamAccess({ ops: 'read' }, { ops: 'maintain' }));
+    assert.deepEqual(ops, [{ kind: 'change', team: 'ops', method: 'PUT', permission: 'pull' }]);
+  });
+
+  it('emits grants, changes, then revokes with API permission values', () => {
+    const ops = planTeamAccessOps(diffTeamAccess({ a: 'write', b: 'admin' }, { b: 'read', c: 'triage' }));
+    assert.deepEqual(ops, [
+      { kind: 'grant', team: 'a', method: 'PUT', permission: 'push' },
+      { kind: 'change', team: 'b', method: 'PUT', permission: 'admin' },
+      { kind: 'revoke', team: 'c', method: 'DELETE', permission: null },
+    ]);
+  });
+
+  it('is empty when nothing differs', () => {
+    assert.deepEqual(planTeamAccessOps(diffTeamAccess({ a: 'read' }, { a: 'read' })), []);
   });
 });
 
