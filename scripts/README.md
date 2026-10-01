@@ -11,6 +11,9 @@ knowledge base supports via `make split-lore`.
   `update-kb.sh`, `rename.sh`, `split-lore.sh`, `new-repo.mjs`,
   `repo-rename.mjs`, `repos-sync-names.mjs`, `repo-policy.mjs`.
   All stdlib-only — no `npm install` required.
+- `manifest-worktree.mjs` — shared helpers for landing a `household.json`
+  change as a PR: base-ref selection, the primary-checkout guard, and the
+  throwaway-worktree commit/push/cleanup. Used by `new-repo.mjs`.
 - `Makefile.shared` — the shared make targets (`setup`, `pull`, `status`,
   `update-kb`, `repos-create`, `repos-rename`, `repos-sync-names`, `policy-*`,
   `test-scripts`). The root `Makefile` does `include scripts/Makefile.shared`
@@ -18,6 +21,50 @@ knowledge base supports via `make split-lore`.
 - `claude-settings.json` — canonical Claude Code baseline. `setup.sh` copies
   it to the workspace root's `.claude/settings.json` on every run; that copy
   is generated, not tracked.
+
+## `new-repo.mjs` — create and register a repo
+
+```
+make repos-create NAME=my-service DESCRIPTION="Service description" [TAGS=core,backend]
+# or, for the interactive prompts:
+make repos-create
+```
+
+Creates a private GitHub repo in the household org, pushes `main`, and
+registers it in `household.json` through a PR.
+
+**Where the repo comes from is decided, not asked.** Run from the workspace
+root (which is where `make` runs it), it scaffolds `./<name>/` — `git init -b
+main`, a starter README, an initial commit. Run from inside an existing
+checkout (`../scripts/new-repo.mjs`), it publishes that checkout (on `main`, at
+least one commit, no `origin`). `--new` / `--here` override either default. It
+refuses to run from a git worktree of the meta-repo.
+
+**`make repos-create NAME=… DESCRIPTION=…` never prompts.** The make target
+then forwards `--tags=`, and an explicitly empty value means "no tags". Omit
+`--tags` entirely when calling the script directly to be asked for them.
+
+**The manifest change is a PR, not an uncommitted edit.** The entry is
+written, committed on `chore/repos-create-<name>` and pushed from a throwaway
+`git worktree` built on `origin/main`, so this checkout's branch, index and
+uncommitted changes are never touched and the command is safe to run alongside
+other sessions. The worktree, the name check against the manifest there, and a
+check that `gh` is signed in and the name is free on GitHub all come before
+anything is scaffolded or created, so a name taken in either place fails with
+no side effects. A later failure prints what was left behind: a scaffolded
+`./<name>/` that never reached GitHub is named as safe to delete.
+
+**The new entry is managed from day one:**
+
+- `teamAccess` — every grant that all repos with a `teamAccess` block share at
+  the same level. Omitted, leaving the repo unmanaged, when nothing is shared;
+  never `{}`, which would revoke every grant.
+- `branchProtection` — `requiredStatusCheck: null`, since a new repo has no CI.
+
+Branch protection and team access are then applied (best-effort) by the
+worktree's own `repo-policy.mjs`, which reads the manifest that already has the
+entry. The PR body records which steps succeeded and the `make` target to rerun
+for any that failed.
 
 ## `repo-rename.mjs` — end-to-end repo rename
 

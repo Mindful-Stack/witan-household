@@ -179,7 +179,7 @@ git clone <your-household-repo-url> .witan-tmp
 
 | Command | What it does |
 |---------|--------------|
-| `make repos-create NAME=foo DESCRIPTION="..." [TAGS=t1,t2]` | Publish the current local repo to your GitHub org and register it in `household.json` (run with no vars for interactive mode) |
+| `make repos-create NAME=foo DESCRIPTION="..." [TAGS=t1,t2]` | Scaffold `./foo/`, publish it to your GitHub org, and open a PR registering it in `household.json` (with shared team access and branch protection defaults); your checkout is left untouched. Run with no vars for interactive mode |
 | `make repos-rename OLD=foo NEW=bar` | Rename a repo end-to-end: GitHub rename + `household.json` update + opens a PR |
 | `make repos-sync-names` | Dry-run: sync local sibling dir names + remote URLs **to match** `household.json` — run after a rename PR merges to catch up |
 | `make repos-sync-names-apply` | Execute the renames + URL updates (interactive confirm) |

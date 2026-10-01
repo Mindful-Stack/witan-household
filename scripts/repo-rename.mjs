@@ -29,7 +29,7 @@
 //   ./scripts/repo-rename.mjs OLD NEW --yes          Skip the confirmation prompt
 //   ./scripts/repo-rename.mjs OLD NEW --rename-local  Also rename the local sibling folder
 
-import { readFile, writeFile, rename as fsRename, stat, unlink } from 'node:fs/promises';
+import { readFile, rename as fsRename, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +38,7 @@ import path from 'node:path';
 
 import { formatRepos } from './repo-policy.mjs';
 import { parseRemoteUrl } from './repos-sync-names.mjs';
+import { isWorkingTreeClean, currentBranch, writeFileAtomic } from './manifest-worktree.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -201,27 +202,6 @@ export function applyRenameToManifest(manifest, oldName, newName) {
 }
 
 // === I/O =======================================================================
-
-async function isWorkingTreeClean(dir) {
-  const { stdout } = await execFileP('git', ['-C', dir, 'status', '--porcelain']);
-  return stdout.trim() === '';
-}
-
-async function currentBranch(dir) {
-  const { stdout } = await execFileP('git', ['-C', dir, 'branch', '--show-current']);
-  return stdout.trim();
-}
-
-async function writeFileAtomic(filePath, content) {
-  const tmp = filePath + '.tmp';
-  try {
-    await writeFile(tmp, content);
-    await fsRename(tmp, filePath);
-  } catch (e) {
-    await unlink(tmp).catch(() => {});   // best-effort cleanup; ignore if absent
-    throw e;
-  }
-}
 
 async function promptLine(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

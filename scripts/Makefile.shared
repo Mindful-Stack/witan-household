@@ -29,8 +29,11 @@ pull:    ## Fetch the meta-repo + every sibling; ff-pull each that's on a clean 
 status:  ## One-line git status for the meta-repo + every sibling
 	@./scripts/status-all.sh
 
-repos-create: ## Publish current repo to your org + register in household.json (NAME= DESCRIPTION= [TAGS=])
-	@./scripts/new-repo.mjs --name="$(NAME)" --description="$(DESCRIPTION)" --tags="$(TAGS)"
+# From the root, new-repo.mjs scaffolds ./<name>/ rather than publishing this
+# checkout. An empty --tags= means "no tags", so with NAME and DESCRIPTION set
+# nothing is prompted for; with no vars --tags is omitted and the prompts ask.
+repos-create: ## Create a repo in your org (scaffolds ./<name>/) + register it in household.json via a PR (NAME= DESCRIPTION= [TAGS=])
+	@./scripts/new-repo.mjs --name="$(NAME)" --description="$(DESCRIPTION)" $(if $(or $(NAME),$(TAGS)),--tags="$(TAGS)")
 
 repos-rename: ## Rename a repo end-to-end: GitHub + household.json + PR. No args = interactive picker; or OLD= NEW= [LOCAL=1]
 	@./scripts/repo-rename.mjs $(OLD) $(NEW) $(if $(LOCAL),--rename-local)

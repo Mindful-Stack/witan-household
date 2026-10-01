@@ -1,41 +1,54 @@
 #!/usr/bin/env node
 // Publish a local repo as a new GitHub repo in the household org.
 //
-// Usage: scripts/new-repo.mjs [--name=<repo-name>] [--description="..."] [--tags=t1,t2]
+// Usage: scripts/new-repo.mjs [--name=<repo-name>] [--description="..."] [--tags=t1,t2] [--here|--new]
 //
 // Run with no flags to be walked through prompts (name prefix → suffix →
-// description → tags), or pass flags for scripted usage. Run from inside the
-// local checkout you want to publish (must be a git repo with at least one
-// commit on main and no existing `origin` remote).
+// description → tags), or pass flags for scripted usage. Where the repo comes
+// from is decided, not asked: run from the household root it scaffolds a new
+// ./<name>/ subdirectory (--new); run from inside an existing checkout it
+// publishes that checkout (--here). Either flag overrides the default.
+//
+// An explicit empty `--tags=` means "no tags" and is not prompted for, so the
+// `make repos-create NAME=… DESCRIPTION=…` call is fully non-interactive.
 //
 // The GitHub org is not hardcoded: it is resolved from household.json — the
 // repos[] entry named by `meta_repo` must have a "url" pointing at
 // github.com/<org>/<repo>.
 //
 // Flow:
-//   1. Pre-flight: in a git repo, has commits, on main, no origin remote.
-//   2. Create the GitHub repo (gh repo create ... --private).
-//   3. Add origin remote and `git push -u origin main`.
-//   4. Append entry to household.json (uses formatRepos to preserve style).
-//
-// The new entry's household.json change is left uncommitted on the meta-repo so
-// the dev can review and commit it themselves.
+//   1. Create a throwaway worktree of the meta-repo on origin/main, validate
+//      the new entry against the manifest there, and check gh is signed in and
+//      the name is free on GitHub (all before any side effects).
+//   2. (--new) Scaffold ./<name>/: git init, README, initial commit.
+//   3. Pre-flight: in a git repo, has commits, on main, no origin remote.
+//   4. Create the GitHub repo (gh repo create ... --private), add origin, push main.
+//   5. Write the entry to household.json in the worktree; commit and push a
+//      chore/repos-create-<name> branch.
+//   6. Apply branch protection and team access from that manifest (best-effort).
+//   7. Open the PR. The meta-repo checkout's branch, index and uncommitted
+//      changes are never touched.
 
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, mkdtemp } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import path from 'node:path';
 
 import { formatRepos } from './repo-policy.mjs';
+import { parseRemoteUrl } from './repos-sync-names.mjs';
+import {
+  worktreeCommands, resolveBaseRef, assertPrimaryCheckout, isWorkingTreeClean,
+  currentBranch, writeFileAtomic, cleanupWorktree, shouldDeleteBranch,
+} from './manifest-worktree.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOUSEHOLD_ROOT = path.resolve(__dirname, '..');
-const MANIFEST_PATH = path.join(HOUSEHOLD_ROOT, 'household.json');
 
 const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const SEGMENT_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -79,15 +92,147 @@ export function resolveOrg(manifest) {
 }
 
 /**
- * Build the household.json entry for a new repo.
+ * The teamAccess block a new repo should start with: every grant that all
+ * managed repos (those with a `teamAccess` key) share at the same level.
+ *
+ * Returns null — leave the entry unmanaged — when no repo declares teamAccess or
+ * the managed repos share nothing. Never `{}`: that means "no teams", and
+ * access-apply would revoke every grant on the repo.
+ *
+ * @param {object} manifest - parsed household.json
+ * @returns {Record<string, string> | null}
  */
-export function buildRepoEntry({ name, description, tags = [] }, org) {
-  return {
+export function defaultTeamAccess(manifest) {
+  const managed = (manifest.repos ?? [])
+    .map(r => r.teamAccess)
+    .filter(t => t && typeof t === 'object' && !Array.isArray(t));
+  if (managed.length === 0) return null;
+  const [first, ...rest] = managed;
+  const shared = Object.fromEntries(
+    Object.entries(first).filter(([team, level]) => rest.every(t => t[team] === level)),
+  );
+  return Object.keys(shared).length ? shared : null;
+}
+
+/**
+ * Build the household.json entry for a new repo.
+ *
+ * Every entry declares branch protection so `make policy-audit` treats the repo
+ * like the rest; a new repo has no CI, so no status check is required yet.
+ * teamAccess is included only when a default exists (see defaultTeamAccess).
+ */
+export function buildRepoEntry({ name, description, tags = [] }, org, { teamAccess = null } = {}) {
+  const entry = {
     name,
     url: `git@github.com:${org}/${name}.git`,
     description,
     tags,
   };
+  if (teamAccess) entry.teamAccess = { ...teamAccess };
+  entry.branchProtection = { requiredStatusCheck: null };
+  return entry;
+}
+
+/**
+ * Return a new manifest with `entry` appended. Throws when the name, or the
+ * GitHub repo the url points at, is already registered. Pure.
+ */
+export function addRepoToManifest(manifest, entry) {
+  const repos = manifest.repos ?? [];
+  if (repos.some(r => r.name === entry.name)) {
+    throw new Error(`household.json already has an entry named "${entry.name}".`);
+  }
+  const target = parseRemoteUrl(entry.url)?.toLowerCase();
+  const clash = target && repos.find(r => parseRemoteUrl(r.url)?.toLowerCase() === target);
+  if (clash) {
+    throw new Error(`household.json entry "${clash.name}" already points at ${target}.`);
+  }
+  return { ...manifest, repos: [...repos, entry] };
+}
+
+/** Branch, commit message and PR title for registering `name`. */
+export function manifestPrPlan(name) {
+  const title = `chore(manifest): register ${name}`;
+  return { branch: `chore/repos-create-${name}`, commitMsg: title, prTitle: title };
+}
+
+/**
+ * The PR body: what the repo is, the defaults written for it, and which policy
+ * steps reached GitHub.
+ *
+ * @param {{ entry: object, org: string,
+ *   policy: { protection: 'applied'|'failed', access: 'applied'|'failed'|'skipped' } }} args
+ */
+export function buildPrBody({ entry, org, policy }) {
+  const { name } = entry;
+  const tags = entry.tags?.length ? entry.tags.map(t => `\`${t}\``).join(', ') : 'none';
+  const access = entry.teamAccess
+    ? `- \`teamAccess\`: ${Object.entries(entry.teamAccess).map(([t, l]) => `\`${t}: ${l}\``).join(', ')} — ` +
+      `the grants every managed repo in the manifest already shares.`
+    : `- no \`teamAccess\` block: no grant is shared by every managed repo, so the entry is ` +
+      `unmanaged for team access. Add one, then \`make access-apply REPO=${name}\`.`;
+  const step = (state, target) => state === 'applied'
+    ? 'applied'
+    : state === 'skipped'
+      ? 'skipped (no `teamAccess` declared)'
+      : `**failed** — after merging, run \`make ${target} REPO=${name}\``;
+  return [
+    `Registers \`${name}\` in household.json. \`make repos-create\` created the private GitHub repo ` +
+      `[${org}/${name}](https://github.com/${org}/${name}) and pushed \`main\`.`,
+    '',
+    `- **Description:** ${entry.description}`,
+    `- **Tags:** ${tags}`,
+    '',
+    '**Defaults written to the entry**',
+    '',
+    access,
+    `- \`branchProtection\`: the standard ruleset with no required status check, since the repo has ` +
+      `no CI yet. Set \`requiredStatusCheck\` once it does, then \`make policy-apply REPO=${name}\`.`,
+    '',
+    '**Applied to GitHub before this PR was opened**',
+    '',
+    `- Branch protection: ${step(policy.protection, 'policy-apply')}`,
+    `- Team access: ${step(policy.access, 'access-apply')}`,
+    '',
+    `**After merge:** \`git pull\` in the meta-repo. Teammates get a local clone with \`make setup\`.`,
+  ].join('\n') + '\n';
+}
+/**
+ * Why `org/name` cannot be created on GitHub, or null when it can. Checked
+ * before anything is scaffolded: the manifest check on the base ref cannot see
+ * a repo created outside it, or one whose registration PR has not merged. Pure.
+ */
+export function githubNameProblem({ authOk, exists, org, name }) {
+  if (!authOk) return 'gh is not authenticated. Run: gh auth login';
+  if (exists) {
+    return `${org}/${name} already exists on GitHub. If an earlier run created it, merge its ` +
+      `registration PR; otherwise pick another name.`;
+  }
+  return null;
+}
+
+/**
+ * What a failed run left behind, and how to get past it on the retry. Pure.
+ *
+ * @param {{ name: string, branch: string, scaffolded: boolean, ghCreated: boolean, pushed: boolean }} state
+ * @returns {string[]} lines for stderr; empty when nothing was left behind
+ */
+export function failureNotes({ name, branch, scaffolded, ghCreated, pushed }) {
+  if (ghCreated) {
+    return [
+      `Note: ${name} already exists on GitHub, so re-running will fail at "gh repo create".`,
+      pushed
+        ? `  Branch ${branch} was pushed; open its PR with: gh pr create --head ${branch}`
+        : `  Register it by hand: add its entry to household.json and open a PR.`,
+    ];
+  }
+  if (scaffolded) {
+    return [
+      `Note: ./${name}/ was scaffolded but nothing reached GitHub. It is safe to delete, and the`,
+      `  retry needs it gone: rm -rf ${name}`,
+    ];
+  }
+  return [];
 }
 
 /**
@@ -110,6 +255,42 @@ export function parseFlags(argv) {
     if (m) opts[m[1]] = m[2] ?? true;
   }
   return opts;
+}
+
+/**
+ * Where the repo comes from. Never prompted: from the household root the answer
+ * is always "scaffold a new subdirectory", and from inside a checkout it is
+ * "publish this one". --here / --new override.
+ */
+export function resolveMode(opts, cwd, householdRoot) {
+  return resolveModeFromFlags(opts) ?? defaultMode(cwd, householdRoot);
+}
+
+/**
+ * Treat an empty --name= or --description= as missing (the make target passes
+ * them through even when unset), but keep an explicit empty --tags= as "no
+ * tags": `make repos-create NAME=…` forwards --tags=, and prompting for it would
+ * make the scripted call need a TTY. Omit --tags entirely to be asked. Pure.
+ */
+export function normalizeOpts(opts) {
+  const out = { ...opts };
+  for (const k of ['name', 'description']) {
+    if (out[k] === '' || out[k] === true) delete out[k];
+  }
+  return out;
+}
+
+/** Which inputs still need a prompt once --name is known. */
+export function missingInputs(opts) {
+  const missing = [];
+  if (!opts.description) missing.push('description');
+  if (opts.tags === undefined) missing.push('tags');
+  return missing;
+}
+
+/** Comma-separated tags → array; anything else (absent, bare flag) → []. */
+export function parseTags(raw) {
+  return typeof raw === 'string' ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
 }
 
 // === Shell helpers ============================================================
@@ -150,17 +331,6 @@ async function promptUntilValid(rl, question, validate, { allowEmpty = false } =
   }
 }
 
-async function promptYesNo(rl, question, defaultYes) {
-  const hint = defaultYes ? '[Y/n]' : '[y/N]';
-  for (;;) {
-    const raw = (await rl.question(`${question} ${hint} `)).trim().toLowerCase();
-    if (!raw) return defaultYes;
-    if (['y', 'yes'].includes(raw)) return true;
-    if (['n', 'no'].includes(raw)) return false;
-    console.error(`  ✗ please answer y or n`);
-  }
-}
-
 function requireTTY() {
   if (!stdin.isTTY) {
     throw new Error('interactive prompts require a TTY — pass --name and --description as flags for non-interactive use');
@@ -191,36 +361,41 @@ async function preflight() {
 function help() {
   console.log(`Usage: scripts/new-repo.mjs [--name=<repo-name>] [--description="..."] [--tags=t1,t2] [--here|--new]
 
-Publishes a local repo as a new GitHub repo under your org. The org is
-resolved from household.json: the meta_repo entry's "url" must point at
-github.com/<org>/<repo>. Two modes:
+Publishes a repo as a new GitHub repo under your org and registers it in
+household.json through a PR. The org is resolved from household.json: the
+meta_repo entry's "url" must point at github.com/<org>/<repo>.
 
-  --here   Use the current directory (must already be a git repo with at
-           least one commit on main and no origin).
-  --new    Scaffold a new ./<name>/ subdirectory: mkdir, git init -b main,
-           write a starter README, commit, then publish.
+Where the repo comes from is decided by where you run it, not asked:
 
-Run with no flags to be prompted for: name prefix, repo suffix,
-description, tags, and which mode to use. The default is --new when run
-from the household root, --here otherwise.
+  household root     --new: scaffold ./<name>/ (mkdir, git init -b main,
+                     starter README, initial commit), then publish it.
+  inside a checkout  --here: publish the current directory (a git repo with
+                     at least one commit on main and no origin).
 
-Pre-flight requirements (--here mode):
-  - Inside a git repo with at least one commit
-  - Current branch is "main"
-  - No existing "origin" remote
+Pass --here or --new to override. Run with no flags to be prompted for name
+prefix, repo suffix, description and tags. Omit --tags to be asked for them;
+--tags= (empty) means no tags and is not prompted for, which is what
+\`make repos-create NAME=… DESCRIPTION=…\` sends — so that call never prompts.
 
-What it does (--new mode also runs step 0):
-  0. mkdir <name>; git init; write README; initial commit
-  1. gh repo create <org>/<name> --private
-  2. git remote add origin git@github.com:<org>/<name>.git
-  3. git push -u origin main
-  4. Append entry to ${path.relative(process.cwd(), MANIFEST_PATH)}
-  5. Apply branch-protection policy (scripts/repo-policy.mjs apply; best-effort)
+What it does:
+  1. Create a throwaway worktree of the meta-repo on origin/main and check
+     the name is free in household.json there.
+  2. (--new) Scaffold ./<name>/.
+  3. Pre-flight: git repo, has commits, on "main", no "origin" remote.
+  4. gh repo create <org>/<name> --private; add origin; git push -u origin main
+  5. Add the entry to household.json in the worktree, commit it on
+     chore/repos-create-<name>, push.
+  6. Apply branch protection and team access from that manifest
+     (repo-policy.mjs apply / access-apply; best-effort).
+  7. Open the PR. This checkout's branch, index and uncommitted changes are
+     never touched.
+
+The new entry gets the teamAccess grants every managed repo already shares
+(omitted when there are none) and branchProtection with no required status
+check.
 
 Repos are created --private (the most portable default; --internal is
 specific to certain GitHub org plans — edit this script if you want it).
-
-After it finishes, commit the updated household.json in the meta-repo.
 
 Naming: lowercase [a-z0-9] words separated by single hyphens. Single-word
 names are allowed (lore, backend, ...), as are prefixed ones (acme-foo).
@@ -237,16 +412,7 @@ export function resolveModeFromFlags(opts) {
 }
 
 async function gatherInputs(opts) {
-  let flagMode;
-  try {
-    flagMode = resolveModeFromFlags(opts);
-  } catch (err) {
-    console.error(`Error: ${err.message}`);
-    process.exit(2);
-  }
-  const suggestedMode = flagMode ?? defaultMode(process.cwd(), HOUSEHOLD_ROOT);
-
-  // Flag path: --name given. Validate strictly; only prompt for missing description/tags/mode.
+  // Flag path: --name given. Validate strictly; only prompt for what is missing.
   if (opts.name) {
     const err = validateName(opts.name);
     if (err) {
@@ -255,25 +421,22 @@ async function gatherInputs(opts) {
     }
     let description = opts.description;
     let tagsRaw = opts.tags;
-    let mode = flagMode;
-    if (!description || tagsRaw === undefined || mode === null) {
+    const missing = missingInputs(opts);
+    if (missing.length) {
       requireTTY();
       await withReadline(async (rl) => {
-        if (!description) {
+        if (missing.includes('description')) {
           description = await promptUntilValid(rl, 'Description? ', v => v ? null : 'description is required');
         }
-        if (tagsRaw === undefined) {
+        if (missing.includes('tags')) {
           tagsRaw = await promptUntilValid(rl, 'Tags (comma-separated, optional)? ', () => null, { allowEmpty: true });
-        }
-        if (mode === null) {
-          mode = await promptMode(rl, opts.name, suggestedMode);
         }
       });
     }
-    return { name: opts.name, description, tagsRaw, mode };
+    return { name: opts.name, description, tagsRaw };
   }
 
-  // Interactive path: prompt for prefix → suffix → description → tags → mode.
+  // Interactive path: prompt for prefix → suffix → description → tags.
   requireTTY();
   return withReadline(async (rl) => {
     const prefix = await promptUntilValid(
@@ -300,30 +463,29 @@ async function gatherInputs(opts) {
       () => null,
       { allowEmpty: true },
     );
-    const mode = flagMode ?? await promptMode(rl, name, suggestedMode);
-    return { name, description, tagsRaw, mode };
+    return { name, description, tagsRaw };
   });
 }
 
-async function promptMode(rl, name, suggested) {
-  const cwd = process.cwd();
-  console.log(`\nWhere should the new repo live?`);
-  console.log(`  - current directory: ${cwd}`);
-  console.log(`  - new subdirectory:  ${path.join(cwd, name)}/`);
-  const useNew = await promptYesNo(rl, `Create a new subdirectory ./${name}/ ?`, suggested === 'new');
-  return useNew ? 'new' : 'here';
+/** Throw before any side effect if `org/name` cannot be created on GitHub. */
+async function assertNameFreeOnGitHub(org, name) {
+  const authOk = await shOk('gh', ['auth', 'status']);
+  const exists = authOk && await shOk('gh', ['repo', 'view', `${org}/${name}`, '--json', 'name']);
+  const problem = githubNameProblem({ authOk, exists, org, name });
+  if (problem) throw new Error(problem);
+}
+
+/** Refuse a non-empty ./<name>/: it is the user's, never ours to scaffold into. */
+async function assertScaffoldTarget(name) {
+  const target = path.resolve(process.cwd(), name);
+  if (existsSync(target) && (await readdir(target)).length > 0) {
+    throw new Error(`directory ${target} already exists and is not empty`);
+  }
 }
 
 async function seedNewDir(name, description) {
   const target = path.resolve(process.cwd(), name);
-  if (existsSync(target)) {
-    const entries = await readdir(target);
-    if (entries.length > 0) {
-      throw new Error(`directory ${target} already exists and is not empty`);
-    }
-  } else {
-    await mkdir(target, { recursive: false });
-  }
+  if (!existsSync(target)) await mkdir(target, { recursive: false });
   process.chdir(target);
   await runStreamed('git', ['init', '-b', 'main']);
   const readme = `# ${name}\n\n${description}\n`;
@@ -332,71 +494,150 @@ async function seedNewDir(name, description) {
   await runStreamed('git', ['commit', '-m', 'initial commit']);
 }
 
+/** Run a repo-policy.mjs subcommand; resolve to 'applied' or 'failed', never throw. */
+async function runPolicy(policyScript, subcommand, name) {
+  try {
+    await runStreamed('node', [policyScript, subcommand, name, '--yes']);
+    return 'applied';
+  } catch {
+    return 'failed';
+  }
+}
+
 async function main() {
-  const opts = parseFlags(process.argv.slice(2));
+  const opts = normalizeOpts(parseFlags(process.argv.slice(2)));
 
   if (opts.help || opts.h) {
     help();
     return;
   }
 
-  // Treat empty strings (from `make repos-create` with unset vars) as missing.
-  for (const k of ['name', 'description', 'tags']) {
-    if (opts[k] === '') delete opts[k];
+  let mode;
+  try {
+    mode = resolveMode(opts, process.cwd(), HOUSEHOLD_ROOT);
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(2);
   }
 
-  const { name, description, tagsRaw, mode } = await gatherInputs(opts);
-  const tags = (typeof tagsRaw === 'string' && tagsRaw)
-    ? tagsRaw.split(',').map(s => s.trim()).filter(Boolean)
-    : [];
+  // Sibling repos and household.json live in the primary checkout only.
+  await assertPrimaryCheckout(HOUSEHOLD_ROOT);
 
-  // Resolve the org up front so a misconfigured manifest fails before any
-  // side effects (scaffolding, gh repo create, ...).
-  const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
-  const org = resolveOrg(manifest);
+  const { name, description, tagsRaw } = await gatherInputs(opts);
+  const tags = parseTags(tagsRaw);
+  const plan = manifestPrPlan(name);
 
-  const steps = mode === 'new' ? 6 : 5;
+  console.log(mode === 'new'
+    ? `\nScaffolding a new repo in ./${name}/ (run from the household root; pass --here to publish this directory instead).`
+    : `\nPublishing the current directory ${process.cwd()} (pass --new to scaffold ./${name}/ instead).`);
+  if (!(await isWorkingTreeClean(HOUSEHOLD_ROOT))) {
+    console.log('Note: meta-repo has uncommitted changes; they are untouched (the manifest commit is made in a worktree).');
+  }
+
+  const steps = mode === 'new' ? 7 : 6;
   let step = 1;
   const stepLabel = () => `[${step++}/${steps}]`;
 
-  if (mode === 'new') {
-    console.log(`\n${stepLabel()} Scaffolding ./${name}/ ...`);
-    await seedNewDir(name, description);
-    console.log(`  ok`);
-  }
+  // The worktree and the GitHub name check come first, so a taken name or a
+  // leftover branch fails before anything is scaffolded or created on GitHub.
+  console.log(`\n${stepLabel()} Preparing ${plan.branch} from the base ref...`);
+  const base = await resolveBaseRef(HOUSEHOLD_ROOT);
+  const worktreePath = await mkdtemp(path.join(tmpdir(), 'household-create-'));
+  const [add, ...commitAndPush] = worktreeCommands({
+    workspace: HOUSEHOLD_ROOT, worktreePath, branch: plan.branch, base, commitMsg: plan.commitMsg,
+  });
 
-  console.log(`\n${stepLabel()} Pre-flight checks...`);
-  await preflight();
-  console.log(`  ok`);
-
-  console.log(`\n${stepLabel()} Creating ${org}/${name} on GitHub...`);
-  await runStreamed('gh', ['repo', 'create', `${org}/${name}`, '--private', '--description', description]);
-
-  console.log(`\n${stepLabel()} Adding remote and pushing main...`);
-  await runStreamed('git', ['remote', 'add', 'origin', `git@github.com:${org}/${name}.git`]);
-  await runStreamed('git', ['push', '-u', 'origin', 'main']);
-
-  console.log(`\n${stepLabel()} Adding entry to household.json...`);
-  manifest.repos.push(buildRepoEntry({ name, description, tags }, org));
-  await writeFile(MANIFEST_PATH, formatRepos(manifest), 'utf8');
-  console.log(`  added ${name} to ${path.relative(process.cwd(), MANIFEST_PATH)}`);
-
-  // Best-effort: a policy failure shouldn't undo a successful create+push.
-  console.log(`\n${stepLabel()} Applying branch-protection policy...`);
+  let worktreeAdded = false;
+  let scaffolded = false;
+  let ghCreated = false;
+  let pushed = false;
+  let prUrl;
   try {
-    await runStreamed('node', [path.join(__dirname, 'repo-policy.mjs'), 'apply', name, '--yes']);
-  } catch {
-    console.log(`  warning: policy apply failed — run \`make policy-apply REPO=${name}\` later.`);
+    try {
+      await execFileP(add.cmd, add.args);
+      worktreeAdded = true;
+    } catch (e) {
+      console.error(`Error: could not create worktree for branch "${plan.branch}".`);
+      console.error(`  If the branch already exists, an earlier run may have an open PR for it.`);
+      console.error(`  If not, delete it and retry: git branch -D ${plan.branch}`);
+      throw e;
+    }
+
+    // Build from the manifest on the base ref, never this checkout: a local
+    // copy may be stale (and would revert upstream entries) or carry an
+    // unrelated uncommitted edit.
+    const worktreeManifest = path.join(worktreePath, 'household.json');
+    const baseManifest = JSON.parse(await readFile(worktreeManifest, 'utf8'));
+    const org = resolveOrg(baseManifest);
+    const entry = buildRepoEntry({ name, description, tags }, org, { teamAccess: defaultTeamAccess(baseManifest) });
+    const updated = addRepoToManifest(baseManifest, entry);
+    await assertNameFreeOnGitHub(org, name);
+    console.log(`  ok (forked from ${base})`);
+
+    if (mode === 'new') {
+      console.log(`\n${stepLabel()} Scaffolding ./${name}/ ...`);
+      await assertScaffoldTarget(name);
+      scaffolded = true;   // set before seeding: a failure partway still leaves the directory
+      await seedNewDir(name, description);
+      console.log(`  ok`);
+    }
+
+    console.log(`\n${stepLabel()} Pre-flight checks...`);
+    await preflight();
+    console.log(`  ok`);
+
+    console.log(`\n${stepLabel()} Creating ${org}/${name} on GitHub and pushing main...`);
+    await runStreamed('gh', ['repo', 'create', `${org}/${name}`, '--private', '--description', description]);
+    ghCreated = true;
+    await runStreamed('git', ['remote', 'add', 'origin', `git@github.com:${org}/${name}.git`]);
+    await runStreamed('git', ['push', '-u', 'origin', 'main']);
+
+    console.log(`\n${stepLabel()} Committing the household.json entry to ${plan.branch}...`);
+    await writeFileAtomic(worktreeManifest, formatRepos(updated));
+    for (const { cmd, args } of commitAndPush) await execFileP(cmd, args);
+    pushed = true;
+
+    // Run the worktree's own repo-policy.mjs: it reads the household.json next
+    // to it, which already has the entry. This checkout's copy does not until
+    // the PR merges. Best-effort: a policy failure must not undo the create.
+    console.log(`\n${stepLabel()} Applying branch protection and team access...`);
+    const policyScript = path.join(worktreePath, 'scripts', 'repo-policy.mjs');
+    const policy = {
+      protection: await runPolicy(policyScript, 'apply', name),
+      access: entry.teamAccess ? await runPolicy(policyScript, 'access-apply', name) : 'skipped',
+    };
+
+    console.log(`\n${stepLabel()} Opening PR...`);
+    const { stdout: prOut } = await execFileP('gh', [
+      'pr', 'create',
+      '--head', plan.branch,
+      '--title', plan.prTitle,
+      '--body', buildPrBody({ entry, org, policy }),
+    ], { cwd: worktreePath });
+    prUrl = prOut.trim();
+
+    for (const [what, state, target] of [
+      ['branch protection', policy.protection, 'policy-apply'],
+      ['team access', policy.access, 'access-apply'],
+    ]) {
+      if (state === 'failed') console.log(`  warning: ${what} failed — run \`make ${target} REPO=${name}\` after the PR merges.`);
+    }
+  } catch (e) {
+    const notes = failureNotes({ name, branch: plan.branch, scaffolded, ghCreated, pushed });
+    if (notes.length) console.error(['', ...notes].join('\n'));
+    throw e;
+  } finally {
+    await cleanupWorktree({
+      workspace: HOUSEHOLD_ROOT, worktreePath, branch: plan.branch,
+      deleteBranch: shouldDeleteBranch({ worktreeAdded, prOpened: Boolean(prUrl) }),
+    });
   }
 
-  console.log(`\n✓ ${name} created, pushed, and registered.`);
-  if (mode === 'new') {
-    console.log(`\nNext:`);
-    console.log(`  - cd ${name}/   (your shell is still in the parent dir)`);
-    console.log(`  - review and commit the household.json change in the meta-repo`);
-  } else {
-    console.log(`\nNext: review and commit the household.json change.`);
-  }
+  console.log(`\n✓ ${name} created and pushed; registration PR opened:`);
+  console.log(prUrl);
+  console.log(`\nThis checkout's branch is unchanged (still on ${await currentBranch(HOUSEHOLD_ROOT)}).`);
+  console.log(`household.json here gains the entry once the PR merges and you pull.`);
+  if (mode === 'new') console.log(`Next: cd ${name}/   (your shell is still in the parent dir)`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
