@@ -256,6 +256,35 @@ export function resolveRepoBypassTeam(branchProtection, globalTeam) {
 }
 
 /**
+ * The org to resolve a bypass team's slug in. Teams are org-scoped: a repo's own
+ * team belongs to the repo's org (from its url), the global team to the household org.
+ *
+ * @param {{scope:'repo'|'global'}} team
+ * @param {{householdOrg:string, repoOrg:string}} orgs
+ * @returns {string}
+ */
+export function bypassTeamLookupOrg(team, { householdOrg, repoOrg }) {
+  return team.scope === 'repo' ? repoOrg : householdOrg;
+}
+
+/**
+ * Cache a looked-up id on a repo's slug-only `branchProtection.bypassTeam`
+ * (`audit --write`). Writes only after a successful lookup, never over a declared
+ * id, and never for the global team, so a failed lookup leaves the declaration as is.
+ *
+ * @param {object} branchProtection - mutated in place.
+ * @param {{id:number|null, cached:boolean, scope:'repo'|'global'}|null} resolved
+ * @returns {boolean} true when an id was written.
+ */
+export function cacheRepoBypassTeamId(branchProtection, resolved) {
+  if (resolved?.scope !== 'repo' || resolved.cached) return false;
+  if (!(Number.isInteger(resolved.id) && resolved.id > 0)) return false;
+  if (!branchProtection?.bypassTeam || 'id' in branchProtection.bypassTeam) return false;
+  branchProtection.bypassTeam.id = resolved.id;
+  return true;
+}
+
+/**
  * Fold a repo's observed protection back into its manifest `branchProtection` block
  * (the `audit --write` re-baseline).
  *
@@ -787,9 +816,12 @@ async function cmdAudit({ write }) {
     try {
       bypassTeam = resolveRepoBypassTeam(repo.branchProtection, bypass);
       if (bypassTeam?.scope === 'repo' && !bypassTeam.cached) {
-        bypassTeam.id = await getTeamId(org, bypassTeam.slug);
+        const lookupOrg = bypassTeamLookupOrg(bypassTeam, { householdOrg: org, repoOrg: ghOrg });
+        bypassTeam.id = await getTeamId(lookupOrg, bypassTeam.slug);
       }
     } catch (e) {
+      // A failed lookup must not leave a half-resolved team for --write to cache.
+      bypassTeam = null;
       bypassConfigError = e.message;
     }
     // Team access (per-repo-org). Degrade to an error marker so one repo's
@@ -830,7 +862,7 @@ async function cmdAudit({ write }) {
     const threads = tribool(r.threadResolution);
     const co = tribool(r.codeOwnerReview);
     const bypassStr = r.bypassConfigError
-      ? `${formatBypassActors(r.bypassActors, teamSlugById)} ⚠ invalid manifest (see warning)`
+      ? `${formatBypassActors(r.bypassActors, teamSlugById)} ⚠ bypass team unresolved (see warning)`
       : formatBypassActors(r.bypassActors, teamSlugById, {
           allowBypass: resolveAllowBypass(r.repo.branchProtection),
           repoTeam: r.bypassTeam?.scope === 'repo' ? r.bypassTeam : null,
@@ -874,9 +906,7 @@ async function cmdAudit({ write }) {
     // is never inferred from GitHub; only its missing id is cached.
     for (const r of results) {
       r.repo.branchProtection = r.repo.branchProtection || {};
-      if (r.bypassTeam?.scope === 'repo' && !r.bypassTeam.cached) {
-        r.repo.branchProtection.bypassTeam.id = r.bypassTeam.id;
-      }
+      cacheRepoBypassTeamId(r.repo.branchProtection, r.bypassTeam);
       applyInferredProtection(r.repo.branchProtection, {
         statusCheck: r.statusCheck,
         bypassAllowed: bypass && r.activeCount > 0 ? r.bypassActors.length > 0 : null,
@@ -955,8 +985,9 @@ async function cmdApply(repoName, { dryRun, yes }) {
   try { bypass = resolveRepoBypassTeam(repo.branchProtection, resolveBypassTeamFromManifest(manifest)); }
   catch (e) { console.error(`apply: ${repo.name}: ${e.message}`); process.exit(2); }
   if (bypass && !bypass.cached) {
-    // Teams are org-scoped: resolve the slug in the household org.
-    bypass.id = await getTeamId(resolveOrg(manifest), bypass.slug);
+    // Teams are org-scoped: a repo's own team lives in the repo's org.
+    const lookupOrg = bypassTeamLookupOrg(bypass, { householdOrg: resolveOrg(manifest), repoOrg: ghOrg });
+    bypass.id = await getTeamId(lookupOrg, bypass.slug);
     const where = bypass.scope === 'repo' ? `${repo.name}'s branchProtection.bypassTeam` : 'branchProtection.bypassTeam';
     console.error(`(note: ${where} id not cached in household.json — run \`audit --write\` to persist)`);
   }

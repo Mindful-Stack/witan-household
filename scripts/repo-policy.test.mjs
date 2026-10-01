@@ -19,6 +19,8 @@ import {
   planTeamAccessOps,
   resolveAllowBypass,
   resolveRepoBypassTeam,
+  bypassTeamLookupOrg,
+  cacheRepoBypassTeamId,
   validateTeamAccessShape,
   formatTeamAccessActual,
   formatTeamAccessDrift,
@@ -671,6 +673,45 @@ describe('resolveRepoBypassTeam', () => {
         `should reject ${JSON.stringify(v)}`,
       );
     }
+  });
+});
+
+// === bypassTeamLookupOrg ===
+
+describe('bypassTeamLookupOrg', () => {
+  it('looks a per-repo team up in the repo\'s own org', () => {
+    assert.equal(bypassTeamLookupOrg({ scope: 'repo' }, { householdOrg: 'home-org', repoOrg: 'other-org' }), 'other-org');
+  });
+
+  it('keeps looking the global team up in the household org', () => {
+    assert.equal(bypassTeamLookupOrg({ scope: 'global' }, { householdOrg: 'home-org', repoOrg: 'other-org' }), 'home-org');
+  });
+});
+
+// === cacheRepoBypassTeamId ===
+
+describe('cacheRepoBypassTeamId', () => {
+  it('caches the id of a slug-only per-repo team after a successful lookup', () => {
+    const bp = { requiredStatusCheck: null, bypassTeam: { slug: 'release-team' } };
+    assert.equal(cacheRepoBypassTeamId(bp, { slug: 'release-team', id: 7, cached: false, scope: 'repo' }), true);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team', id: 7 });
+  });
+
+  it('leaves the declaration untouched when the lookup failed (id still null)', () => {
+    const bp = { requiredStatusCheck: null, bypassTeam: { slug: 'release-team' } };
+    assert.equal(cacheRepoBypassTeamId(bp, { slug: 'release-team', id: null, cached: false, scope: 'repo' }), false);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team' }, 'no id: null written');
+    assert.equal(cacheRepoBypassTeamId(bp, null), false);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team' });
+  });
+
+  it('never overwrites a declared id or touches the global team', () => {
+    const bp = { bypassTeam: { slug: 'release-team', id: 7 } };
+    assert.equal(cacheRepoBypassTeamId(bp, { slug: 'release-team', id: 99, cached: true, scope: 'repo' }), false);
+    assert.equal(bp.bypassTeam.id, 7);
+    const plain = { requiredStatusCheck: null };
+    assert.equal(cacheRepoBypassTeamId(plain, { slug: 'my-team', id: 42, cached: false, scope: 'global' }), false);
+    assert.ok(!('bypassTeam' in plain));
   });
 });
 
