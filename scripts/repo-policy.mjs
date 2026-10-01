@@ -285,6 +285,50 @@ export function cacheRepoBypassTeamId(branchProtection, resolved) {
 }
 
 /**
+ * Resolve a repo's effective bypass team for `audit`, looking up a slug-only
+ * per-repo team's id in the repo's org. Never throws: an invalid declaration or a
+ * failed lookup comes back as `bypassConfigError` with `bypassTeam: null`, so no
+ * half-resolved team (id: null) is left for `--write` to cache.
+ *
+ * @param {object|undefined} branchProtection
+ * @param {object|null} globalTeam
+ * @param {{householdOrg:string, repoOrg:string, lookup:(org:string, slug:string)=>Promise<number>}} ctx
+ * @returns {Promise<{bypassTeam:object|null, bypassConfigError:string|null}>}
+ */
+export async function resolveAuditBypassTeam(branchProtection, globalTeam, { householdOrg, repoOrg, lookup }) {
+  try {
+    const team = resolveRepoBypassTeam(branchProtection, globalTeam);
+    if (team?.scope === 'repo' && !team.cached) {
+      const id = await lookup(bypassTeamLookupOrg(team, { householdOrg, repoOrg }), team.slug);
+      return { bypassTeam: { ...team, id }, bypassConfigError: null };
+    }
+    return { bypassTeam: team, bypassConfigError: null };
+  } catch (e) {
+    return { bypassTeam: null, bypassConfigError: e.message };
+  }
+}
+
+/**
+ * Per-repo bypass-team notes printed after the audit table. Suggests `--write`
+ * only for a repo team that resolved but is not cached; a failed lookup gets a
+ * warning instead, since `--write` would not persist anything for it.
+ *
+ * @param {{repo:{name:string}, bypassTeam:object|null, bypassConfigError:string|null}[]} results
+ * @param {{write:boolean}} opts
+ * @returns {string[]}
+ */
+export function repoBypassNotes(results, { write }) {
+  const notes = [];
+  for (const r of results) {
+    if (r.bypassConfigError) notes.push(`(warning: ${r.repo.name}: ${r.bypassConfigError})`);
+    else if (!write && r.bypassTeam?.scope === 'repo' && !r.bypassTeam.cached) {
+      notes.push(`(note: ${r.repo.name}'s bypass team id not cached — run with --write to persist)`);
+    }
+  }
+  return notes;
+}
+
+/**
  * Fold a repo's observed protection back into its manifest `branchProtection` block
  * (the `audit --write` re-baseline).
  *
@@ -812,18 +856,8 @@ async function cmdAudit({ write }) {
     const summary = summarizeState(details, classic, repoMeta);
     // Effective bypass team; a repo's own uncached team id is resolved here so
     // the Bypass column can compare by id and --write can cache it.
-    let bypassTeam = null, bypassConfigError = null;
-    try {
-      bypassTeam = resolveRepoBypassTeam(repo.branchProtection, bypass);
-      if (bypassTeam?.scope === 'repo' && !bypassTeam.cached) {
-        const lookupOrg = bypassTeamLookupOrg(bypassTeam, { householdOrg: org, repoOrg: ghOrg });
-        bypassTeam.id = await getTeamId(lookupOrg, bypassTeam.slug);
-      }
-    } catch (e) {
-      // A failed lookup must not leave a half-resolved team for --write to cache.
-      bypassTeam = null;
-      bypassConfigError = e.message;
-    }
+    const { bypassTeam, bypassConfigError } = await resolveAuditBypassTeam(
+      repo.branchProtection, bypass, { householdOrg: org, repoOrg: ghOrg, lookup: getTeamId });
     // Team access (per-repo-org). Degrade to an error marker so one repo's
     // failure doesn't reject the whole audit.
     let teamAccessActual = null, teamAccessError = null;
@@ -923,15 +957,8 @@ async function cmdAudit({ write }) {
     if (bypass && !bypass.cached) {
       console.error('(note: bypass team id not cached in household.json — run with --write to persist)');
     }
-    for (const r of results) {
-      if (r.bypassTeam?.scope === 'repo' && !r.bypassTeam.cached) {
-        console.error(`(note: ${r.repo.name}'s bypass team id not cached — run with --write to persist)`);
-      }
-    }
   }
-  for (const r of results) {
-    if (r.bypassConfigError) console.error(`(warning: ${r.repo.name}: ${r.bypassConfigError})`);
-  }
+  for (const note of repoBypassNotes(results, { write })) console.error(note);
 }
 
 /**

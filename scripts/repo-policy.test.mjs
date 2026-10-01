@@ -21,6 +21,8 @@ import {
   resolveRepoBypassTeam,
   bypassTeamLookupOrg,
   cacheRepoBypassTeamId,
+  resolveAuditBypassTeam,
+  repoBypassNotes,
   validateTeamAccessShape,
   formatTeamAccessActual,
   formatTeamAccessDrift,
@@ -712,6 +714,79 @@ describe('cacheRepoBypassTeamId', () => {
     const plain = { requiredStatusCheck: null };
     assert.equal(cacheRepoBypassTeamId(plain, { slug: 'my-team', id: 42, cached: false, scope: 'global' }), false);
     assert.ok(!('bypassTeam' in plain));
+  });
+});
+
+// === resolveAuditBypassTeam ===
+
+describe('resolveAuditBypassTeam', () => {
+  const orgs = { householdOrg: 'home-org', repoOrg: 'other-org' };
+  const slugOnly = { requiredStatusCheck: null, bypassTeam: { slug: 'release-team' } };
+
+  it('resolves a slug-only repo team in the repo\'s org', async () => {
+    const calls = [];
+    const lookup = async (org, slug) => { calls.push([org, slug]); return 7; };
+    const r = await resolveAuditBypassTeam(slugOnly, null, { ...orgs, lookup });
+    assert.deepEqual(calls, [['other-org', 'release-team']]);
+    assert.deepEqual(r, { bypassTeam: { id: 7, slug: 'release-team', cached: false, scope: 'repo' }, bypassConfigError: null });
+  });
+
+  it('drops the half-resolved team when the lookup throws, so nothing caches id: null', async () => {
+    const lookup = async () => { throw new Error('HTTP 404: Not Found'); };
+    const r = await resolveAuditBypassTeam(slugOnly, null, { ...orgs, lookup });
+    assert.equal(r.bypassTeam, null, 'no team left behind for --write');
+    assert.match(r.bypassConfigError, /404/);
+    const bp = structuredClone(slugOnly);
+    assert.equal(cacheRepoBypassTeamId(bp, r.bypassTeam), false);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team' }, 'declaration left as is');
+  });
+
+  it('reports an invalid declaration without looking anything up', async () => {
+    let called = false;
+    const lookup = async () => { called = true; return 7; };
+    const r = await resolveAuditBypassTeam({ allowBypass: false, bypassTeam: { slug: 'release-team' } }, null, { ...orgs, lookup });
+    assert.equal(called, false);
+    assert.equal(r.bypassTeam, null);
+    assert.match(r.bypassConfigError, /contradictory/);
+  });
+
+  it('does not look up a cached repo team or the global team', async () => {
+    const lookup = async () => { throw new Error('should not be called'); };
+    const cached = await resolveAuditBypassTeam({ bypassTeam: { slug: 'release-team', id: 7 } }, null, { ...orgs, lookup });
+    assert.equal(cached.bypassTeam.id, 7);
+    const global = await resolveAuditBypassTeam({}, { id: null, slug: 'my-team', cached: false }, { ...orgs, lookup });
+    assert.equal(global.bypassTeam.scope, 'global');
+  });
+});
+
+// === repoBypassNotes ===
+
+describe('repoBypassNotes', () => {
+  const repo = name => ({ name });
+
+  it('suggests --write only for a repo team that resolved but is not cached', () => {
+    const notes = repoBypassNotes([
+      { repo: repo('a'), bypassTeam: { id: 7, slug: 't', cached: false, scope: 'repo' }, bypassConfigError: null },
+      { repo: repo('b'), bypassTeam: { id: 7, slug: 't', cached: true, scope: 'repo' }, bypassConfigError: null },
+      { repo: repo('c'), bypassTeam: { id: null, slug: 'g', cached: false, scope: 'global' }, bypassConfigError: null },
+    ], { write: false });
+    assert.deepEqual(notes, ["(note: a's bypass team id not cached — run with --write to persist)"]);
+  });
+
+  it('warns instead of suggesting --write when the lookup failed', () => {
+    const notes = repoBypassNotes([
+      { repo: repo('a'), bypassTeam: null, bypassConfigError: 'HTTP 404: Not Found' },
+    ], { write: false });
+    assert.deepEqual(notes, ['(warning: a: HTTP 404: Not Found)']);
+    assert.ok(!notes.some(n => n.includes('--write')));
+  });
+
+  it('only warns in --write mode (the id was cached or left alone)', () => {
+    const notes = repoBypassNotes([
+      { repo: repo('a'), bypassTeam: { id: 7, slug: 't', cached: false, scope: 'repo' }, bypassConfigError: null },
+      { repo: repo('b'), bypassTeam: null, bypassConfigError: 'boom' },
+    ], { write: true });
+    assert.deepEqual(notes, ['(warning: b: boom)']);
   });
 });
 
