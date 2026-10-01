@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { parseRemoteUrl } from '../scripts/repos-sync-names.mjs';
 import { validateName } from '../scripts/new-repo.mjs';
-import { validateTeamAccessShape } from '../scripts/repo-policy.mjs';
+import { validateTeamAccessShape, resolveRepoBypassTeam } from '../scripts/repo-policy.mjs';
 
 // Loads the real household.json and asserts its shape. Catches hand-edits that
 // the pure-function unit tests can't (since the manifest is mostly curated by
@@ -110,6 +110,12 @@ describe('household.json (per-repo shape)', () => {
           v, false,
           `allowBypass is an opt-out flag: omit it rather than setting ${JSON.stringify(v)}`,
         );
+      });
+
+      it('branchProtection.bypassTeam (if set) is a valid team, not combined with allowBypass: false', () => {
+        if (repo.branchProtection === undefined) return;
+        if (!('bypassTeam' in repo.branchProtection)) return; // optional override
+        assert.doesNotThrow(() => resolveRepoBypassTeam(repo.branchProtection, null));
       });
 
       it('teamAccess (if set) is a valid shape', () => {
