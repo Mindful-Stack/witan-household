@@ -8,6 +8,7 @@ import {
   validateName, validateSegment, resolveOrg, buildRepoEntry, parseFlags, defaultMode,
   resolveModeFromFlags, resolveMode, normalizeOpts, missingInputs, parseTags,
   defaultTeamAccess, addRepoToManifest, manifestPrPlan, buildPrBody,
+  githubNameProblem, failureNotes,
 } from './new-repo.mjs';
 
 describe('validateName', () => {
@@ -431,5 +432,52 @@ describe('make repos-create', () => {
 
   it('omits --tags with no vars, so the interactive mode still asks for them', () => {
     assert.doesNotMatch(recipe(), /--tags/);
+  });
+});
+
+describe('githubNameProblem', () => {
+  it('is null when gh is signed in and the name is free', () => {
+    assert.equal(githubNameProblem({ authOk: true, exists: false, org: 'acme-org', name: 'acme-foo' }), null);
+  });
+
+  it('reports a name already taken on GitHub', () => {
+    // e.g. a registration PR from an earlier run that has not merged yet:
+    // the manifest check on the base ref cannot see it.
+    assert.match(
+      githubNameProblem({ authOk: true, exists: true, org: 'acme-org', name: 'acme-foo' }),
+      /acme-org\/acme-foo already exists on GitHub/);
+  });
+
+  it('reports an unauthenticated gh before anything else', () => {
+    assert.match(
+      githubNameProblem({ authOk: false, exists: false, org: 'acme-org', name: 'acme-foo' }),
+      /gh auth login/);
+  });
+});
+
+describe('failureNotes', () => {
+  const base = { name: 'acme-foo', branch: 'chore/repos-create-acme-foo', scaffolded: false, ghCreated: false, pushed: false };
+
+  it('says nothing when nothing was left behind', () => {
+    assert.deepEqual(failureNotes(base), []);
+  });
+
+  it('points at a scaffolded directory the retry would trip over', () => {
+    const notes = failureNotes({ ...base, scaffolded: true }).join('\n');
+    assert.match(notes, /\.\/acme-foo\//);
+    assert.match(notes, /safe to delete/);
+    assert.match(notes, /rm -rf acme-foo/);
+  });
+
+  it('does not offer to delete the directory once it is on GitHub', () => {
+    const notes = failureNotes({ ...base, scaffolded: true, ghCreated: true }).join('\n');
+    assert.doesNotMatch(notes, /rm -rf/);
+    assert.match(notes, /already exists on GitHub/);
+    assert.match(notes, /Register it by hand/);
+  });
+
+  it('points at the pushed branch when only the PR is missing', () => {
+    const notes = failureNotes({ ...base, ghCreated: true, pushed: true }).join('\n');
+    assert.match(notes, /gh pr create --head chore\/repos-create-acme-foo/);
   });
 });

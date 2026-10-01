@@ -48,9 +48,11 @@ then forwards `--tags=`, and an explicitly empty value means "no tags". Omit
 written, committed on `chore/repos-create-<name>` and pushed from a throwaway
 `git worktree` built on `origin/main`, so this checkout's branch, index and
 uncommitted changes are never touched and the command is safe to run alongside
-other sessions. The worktree, and the name check against the manifest there,
-come before anything is scaffolded or created on GitHub, so a taken name fails
-with no side effects.
+other sessions. The worktree, the name check against the manifest there, and a
+check that `gh` is signed in and the name is free on GitHub all come before
+anything is scaffolded or created, so a name taken in either place fails with
+no side effects. A later failure prints what was left behind: a scaffolded
+`./<name>/` that never reached GitHub is named as safe to delete.
 
 **The new entry is managed from day one:**
 

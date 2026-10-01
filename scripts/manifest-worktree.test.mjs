@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { worktreeCommands, pickBaseRef, isLinkedWorktree } from './manifest-worktree.mjs';
+import { worktreeCommands, pickBaseRef, isLinkedWorktree, shouldDeleteBranch } from './manifest-worktree.mjs';
 
 describe('worktreeCommands', () => {
   const plan = worktreeCommands({
@@ -84,5 +84,21 @@ describe('isLinkedWorktree', () => {
 
   it('normalises before comparing', () => {
     assert.equal(isLinkedWorktree('/ws/./.git', '/ws/.git'), false);
+  });
+});
+
+describe('shouldDeleteBranch', () => {
+  it('deletes the branch this run created when no PR was opened', () => {
+    assert.equal(shouldDeleteBranch({ worktreeAdded: true, prOpened: false }), true);
+  });
+
+  it('keeps the branch once its PR is open', () => {
+    assert.equal(shouldDeleteBranch({ worktreeAdded: true, prOpened: true }), false);
+  });
+
+  it('never deletes a branch this run did not create', () => {
+    // `worktree add -b` fails when the branch already exists, e.g. kept by an
+    // earlier successful run whose PR has not merged. That branch is not ours.
+    assert.equal(shouldDeleteBranch({ worktreeAdded: false, prOpened: false }), false);
   });
 });

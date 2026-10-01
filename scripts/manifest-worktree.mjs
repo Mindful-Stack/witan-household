@@ -64,6 +64,17 @@ export function worktreeCommands({ workspace, worktreePath, branch, base, commit
   ];
 }
 
+/**
+ * Whether cleanup may delete the manifest branch.
+ *
+ * Only a branch this run created (`worktree add -b` succeeded) and that has no
+ * PR yet. When `add` fails because the branch already exists, that branch
+ * belongs to someone else, e.g. an earlier run whose PR has not merged.
+ */
+export function shouldDeleteBranch({ worktreeAdded, prOpened }) {
+  return worktreeAdded && !prOpened;
+}
+
 // === I/O =======================================================================
 
 export async function isWorkingTreeClean(dir) {
@@ -124,14 +135,15 @@ export async function writeFileAtomic(filePath, content) {
 }
 
 /**
- * Remove the throwaway worktree, and its branch too unless a PR was opened.
+ * Remove the throwaway worktree, and its branch too when `deleteBranch` (see
+ * shouldDeleteBranch).
  *
  * Best-effort: must never mask the real error from the caller's try block.
  * `worktree add -b` creates the branch as a side effect and `worktree remove`
  * leaves it behind, so without the branch delete any failure after `add` would
  * block the retry.
  */
-export async function cleanupWorktree({ workspace, worktreePath, branch, keepBranch }) {
+export async function cleanupWorktree({ workspace, worktreePath, branch, deleteBranch }) {
   await execFileP('git', ['-C', workspace, 'worktree', 'remove', '--force', worktreePath])
     .catch(async () => {
       // `worktree add` may never have run, in which case git has no record of
@@ -139,7 +151,7 @@ export async function cleanupWorktree({ workspace, worktreePath, branch, keepBra
       await rm(worktreePath, { recursive: true, force: true }).catch(() => {});
       console.error(`Note: could not remove worktree ${worktreePath} — if it persists, run \`git worktree remove --force ${worktreePath}\`.`);
     });
-  if (!keepBranch) {
+  if (deleteBranch) {
     await execFileP('git', ['-C', workspace, 'branch', '-D', branch]).catch(() => {});
   }
 }

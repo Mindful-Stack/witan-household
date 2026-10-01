@@ -17,8 +17,9 @@
 // github.com/<org>/<repo>.
 //
 // Flow:
-//   1. Create a throwaway worktree of the meta-repo on origin/main and validate
-//      the new entry against the manifest there (before any side effects).
+//   1. Create a throwaway worktree of the meta-repo on origin/main, validate
+//      the new entry against the manifest there, and check gh is signed in and
+//      the name is free on GitHub (all before any side effects).
 //   2. (--new) Scaffold ./<name>/: git init, README, initial commit.
 //   3. Pre-flight: in a git repo, has commits, on main, no origin remote.
 //   4. Create the GitHub repo (gh repo create ... --private), add origin, push main.
@@ -42,7 +43,7 @@ import { formatRepos } from './repo-policy.mjs';
 import { parseRemoteUrl } from './repos-sync-names.mjs';
 import {
   worktreeCommands, resolveBaseRef, assertPrimaryCheckout, isWorkingTreeClean,
-  currentBranch, writeFileAtomic, cleanupWorktree,
+  currentBranch, writeFileAtomic, cleanupWorktree, shouldDeleteBranch,
 } from './manifest-worktree.mjs';
 
 const execFileP = promisify(execFile);
@@ -196,6 +197,44 @@ export function buildPrBody({ entry, org, policy }) {
     `**After merge:** \`git pull\` in the meta-repo. Teammates get a local clone with \`make setup\`.`,
   ].join('\n') + '\n';
 }
+/**
+ * Why `org/name` cannot be created on GitHub, or null when it can. Checked
+ * before anything is scaffolded: the manifest check on the base ref cannot see
+ * a repo created outside it, or one whose registration PR has not merged. Pure.
+ */
+export function githubNameProblem({ authOk, exists, org, name }) {
+  if (!authOk) return 'gh is not authenticated. Run: gh auth login';
+  if (exists) {
+    return `${org}/${name} already exists on GitHub. If an earlier run created it, merge its ` +
+      `registration PR; otherwise pick another name.`;
+  }
+  return null;
+}
+
+/**
+ * What a failed run left behind, and how to get past it on the retry. Pure.
+ *
+ * @param {{ name: string, branch: string, scaffolded: boolean, ghCreated: boolean, pushed: boolean }} state
+ * @returns {string[]} lines for stderr; empty when nothing was left behind
+ */
+export function failureNotes({ name, branch, scaffolded, ghCreated, pushed }) {
+  if (ghCreated) {
+    return [
+      `Note: ${name} already exists on GitHub, so re-running will fail at "gh repo create".`,
+      pushed
+        ? `  Branch ${branch} was pushed; open its PR with: gh pr create --head ${branch}`
+        : `  Register it by hand: add its entry to household.json and open a PR.`,
+    ];
+  }
+  if (scaffolded) {
+    return [
+      `Note: ./${name}/ was scaffolded but nothing reached GitHub. It is safe to delete, and the`,
+      `  retry needs it gone: rm -rf ${name}`,
+    ];
+  }
+  return [];
+}
+
 /**
  * Pick a sensible default mode for where to publish from.
  * Returns 'new' when cwd is the household root (no point publishing the
@@ -428,16 +467,25 @@ async function gatherInputs(opts) {
   });
 }
 
+/** Throw before any side effect if `org/name` cannot be created on GitHub. */
+async function assertNameFreeOnGitHub(org, name) {
+  const authOk = await shOk('gh', ['auth', 'status']);
+  const exists = authOk && await shOk('gh', ['repo', 'view', `${org}/${name}`, '--json', 'name']);
+  const problem = githubNameProblem({ authOk, exists, org, name });
+  if (problem) throw new Error(problem);
+}
+
+/** Refuse a non-empty ./<name>/: it is the user's, never ours to scaffold into. */
+async function assertScaffoldTarget(name) {
+  const target = path.resolve(process.cwd(), name);
+  if (existsSync(target) && (await readdir(target)).length > 0) {
+    throw new Error(`directory ${target} already exists and is not empty`);
+  }
+}
+
 async function seedNewDir(name, description) {
   const target = path.resolve(process.cwd(), name);
-  if (existsSync(target)) {
-    const entries = await readdir(target);
-    if (entries.length > 0) {
-      throw new Error(`directory ${target} already exists and is not empty`);
-    }
-  } else {
-    await mkdir(target, { recursive: false });
-  }
+  if (!existsSync(target)) await mkdir(target, { recursive: false });
   process.chdir(target);
   await runStreamed('git', ['init', '-b', 'main']);
   const readme = `# ${name}\n\n${description}\n`;
@@ -490,8 +538,8 @@ async function main() {
   let step = 1;
   const stepLabel = () => `[${step++}/${steps}]`;
 
-  // The worktree comes first, so a taken name or a leftover branch fails
-  // before anything is scaffolded or created on GitHub.
+  // The worktree and the GitHub name check come first, so a taken name or a
+  // leftover branch fails before anything is scaffolded or created on GitHub.
   console.log(`\n${stepLabel()} Preparing ${plan.branch} from the base ref...`);
   const base = await resolveBaseRef(HOUSEHOLD_ROOT);
   const worktreePath = await mkdtemp(path.join(tmpdir(), 'household-create-'));
@@ -499,15 +547,19 @@ async function main() {
     workspace: HOUSEHOLD_ROOT, worktreePath, branch: plan.branch, base, commitMsg: plan.commitMsg,
   });
 
+  let worktreeAdded = false;
+  let scaffolded = false;
   let ghCreated = false;
   let pushed = false;
   let prUrl;
   try {
     try {
       await execFileP(add.cmd, add.args);
+      worktreeAdded = true;
     } catch (e) {
       console.error(`Error: could not create worktree for branch "${plan.branch}".`);
-      console.error(`  If the branch already exists from a failed run: git branch -D ${plan.branch}`);
+      console.error(`  If the branch already exists, an earlier run may have an open PR for it.`);
+      console.error(`  If not, delete it and retry: git branch -D ${plan.branch}`);
       throw e;
     }
 
@@ -519,10 +571,13 @@ async function main() {
     const org = resolveOrg(baseManifest);
     const entry = buildRepoEntry({ name, description, tags }, org, { teamAccess: defaultTeamAccess(baseManifest) });
     const updated = addRepoToManifest(baseManifest, entry);
+    await assertNameFreeOnGitHub(org, name);
     console.log(`  ok (forked from ${base})`);
 
     if (mode === 'new') {
       console.log(`\n${stepLabel()} Scaffolding ./${name}/ ...`);
+      await assertScaffoldTarget(name);
+      scaffolded = true;   // set before seeding: a failure partway still leaves the directory
       await seedNewDir(name, description);
       console.log(`  ok`);
     }
@@ -568,15 +623,14 @@ async function main() {
       if (state === 'failed') console.log(`  warning: ${what} failed — run \`make ${target} REPO=${name}\` after the PR merges.`);
     }
   } catch (e) {
-    if (ghCreated) {
-      console.error(`\nNote: ${name} already exists on GitHub, so re-running will fail at "gh repo create".`);
-      console.error(pushed
-        ? `  Branch ${plan.branch} was pushed; open its PR with: gh pr create --head ${plan.branch}`
-        : `  Register it by hand: add its entry to household.json and open a PR.`);
-    }
+    const notes = failureNotes({ name, branch: plan.branch, scaffolded, ghCreated, pushed });
+    if (notes.length) console.error(['', ...notes].join('\n'));
     throw e;
   } finally {
-    await cleanupWorktree({ workspace: HOUSEHOLD_ROOT, worktreePath, branch: plan.branch, keepBranch: Boolean(prUrl) });
+    await cleanupWorktree({
+      workspace: HOUSEHOLD_ROOT, worktreePath, branch: plan.branch,
+      deleteBranch: shouldDeleteBranch({ worktreeAdded, prOpened: Boolean(prUrl) }),
+    });
   }
 
   console.log(`\n✓ ${name} created and pushed; registration PR opened:`);
