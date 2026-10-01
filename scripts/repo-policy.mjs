@@ -15,7 +15,8 @@
 // household.json is the source of truth for desired branch-protection state.
 // Each repo entry's `branchProtection` block is what `apply` enforces; the
 // optional top-level `branchProtection.bypassTeam` block caches the team config
-// so `apply` doesn't hit GitHub for the team id every run.
+// so `apply` doesn't hit GitHub for the team id every run. A repo's own
+// `branchProtection.bypassTeam` (same shape) replaces it for that repo.
 //
 // The GitHub org is derived from the meta_repo entry's url — no org is
 // hardcoded here. Manifest entries without a `url` are inline directories
@@ -163,9 +164,12 @@ export const PERMISSION_API = {
  *   configured bypass team, or null/undefined when no bypass team is
  *   configured (the ruleset then carries no bypass actors).
  * @param {string|null} [opts.requiredStatusCheck] - optional status-check context name.
+ * @param {boolean} [opts.allowBypass=true] - false drops the bypass team from this
+ *   repo's ruleset, so nobody can merge around review. Set per repo via
+ *   household.json `branchProtection.allowBypass`.
  * @returns {object} Ruleset JSON ready to POST/PUT.
  */
-export function buildRuleset({ bypassTeamId, requiredStatusCheck = null }) {
+export function buildRuleset({ bypassTeamId, requiredStatusCheck = null, allowBypass = true }) {
   const rules = STANDARD_RULES.map(r => structuredClone(r));
   if (requiredStatusCheck) {
     rules.push({
@@ -184,13 +188,172 @@ export function buildRuleset({ bypassTeamId, requiredStatusCheck = null }) {
     conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
     rules,
     // The rulesets API accepts an empty bypass_actors array (no bypass =
-    // strictest); used when no bypass team is configured in household.json.
-    bypass_actors: bypassTeamId == null
+    // strictest); used when no bypass team is configured or the repo opts out.
+    bypass_actors: bypassTeamId == null || !allowBypass
       ? []
       : [
           { actor_id: bypassTeamId, actor_type: 'Team', bypass_mode: 'pull_request' },
         ],
   };
+}
+
+/**
+ * Read a repo's `branchProtection.allowBypass`, defaulting to true when absent.
+ * Throws on a non-boolean: a typo like "false" (a string) must not silently
+ * leave the bypass team in place on a repo that meant to opt out.
+ *
+ * @param {object|undefined} branchProtection
+ * @returns {boolean}
+ */
+export function resolveAllowBypass(branchProtection) {
+  if (!branchProtection || !('allowBypass' in branchProtection)) return true;
+  const v = branchProtection.allowBypass;
+  if (typeof v !== 'boolean') {
+    throw new Error(`branchProtection.allowBypass must be a boolean (got ${JSON.stringify(v)})`);
+  }
+  return v;
+}
+
+/**
+ * Resolve the team that may bypass a repo's ruleset: the repo's own
+ * `branchProtection.bypassTeam` when declared, otherwise the global team.
+ * Returns null when nobody may bypass (`allowBypass: false`, or no team at all).
+ *
+ * Strict like resolveAllowBypass: a malformed repo team must not silently fall
+ * back to the global team, and a repo team next to `allowBypass: false` is
+ * contradictory, so both throw.
+ *
+ * @param {object|undefined} branchProtection - the repo's block.
+ * @param {{id:number|null, slug:string, cached:boolean}|null} globalTeam - from
+ *   resolveBypassTeamFromManifest (or its async wrapper).
+ * @returns {{id:number|null, slug:string, cached:boolean, scope:'repo'|'global'}|null}
+ */
+export function resolveRepoBypassTeam(branchProtection, globalTeam) {
+  const allowBypass = resolveAllowBypass(branchProtection);
+  if (branchProtection && 'bypassTeam' in branchProtection) {
+    const t = branchProtection.bypassTeam;
+    const where = 'branchProtection.bypassTeam';
+    if (t === null || typeof t !== 'object' || Array.isArray(t)) {
+      throw new Error(`${where} must be an object like {"slug": "team"} (got ${JSON.stringify(t)})`);
+    }
+    const extra = Object.keys(t).filter(k => k !== 'slug' && k !== 'id');
+    if (extra.length) throw new Error(`${where} has unknown key(s): ${extra.join(', ')} (allowed: slug, id)`);
+    if (typeof t.slug !== 'string' || t.slug.length === 0) {
+      throw new Error(`${where}.slug must be a non-empty string (got ${JSON.stringify(t.slug)})`);
+    }
+    if ('id' in t && !(Number.isInteger(t.id) && t.id > 0)) {
+      throw new Error(`${where}.id must be a positive integer team id (got ${JSON.stringify(t.id)})`);
+    }
+    if (!allowBypass) {
+      throw new Error(`${where} and allowBypass: false are contradictory: drop one (no bypass, or bypass by "${t.slug}")`);
+    }
+    return 'id' in t
+      ? { id: t.id, slug: t.slug, cached: true, scope: 'repo' }
+      : { id: null, slug: t.slug, cached: false, scope: 'repo' };
+  }
+  if (!allowBypass || !globalTeam) return null;
+  return { ...globalTeam, scope: 'global' };
+}
+
+/**
+ * The org to resolve a bypass team's slug in. Teams are org-scoped: a repo's own
+ * team belongs to the repo's org (from its url), the global team to the household org.
+ *
+ * @param {{scope:'repo'|'global'}} team
+ * @param {{householdOrg:string, repoOrg:string}} orgs
+ * @returns {string}
+ */
+export function bypassTeamLookupOrg(team, { householdOrg, repoOrg }) {
+  return team.scope === 'repo' ? repoOrg : householdOrg;
+}
+
+/**
+ * Cache a looked-up id on a repo's slug-only `branchProtection.bypassTeam`
+ * (`audit --write`). Writes only after a successful lookup, never over a declared
+ * id, and never for the global team, so a failed lookup leaves the declaration as is.
+ *
+ * @param {object} branchProtection - mutated in place.
+ * @param {{id:number|null, cached:boolean, scope:'repo'|'global'}|null} resolved
+ * @returns {boolean} true when an id was written.
+ */
+export function cacheRepoBypassTeamId(branchProtection, resolved) {
+  if (resolved?.scope !== 'repo' || resolved.cached) return false;
+  if (!(Number.isInteger(resolved.id) && resolved.id > 0)) return false;
+  if (!branchProtection?.bypassTeam || 'id' in branchProtection.bypassTeam) return false;
+  branchProtection.bypassTeam.id = resolved.id;
+  return true;
+}
+
+/**
+ * Resolve a repo's effective bypass team for `audit`, looking up a slug-only
+ * per-repo team's id in the repo's org. Never throws: an invalid declaration or a
+ * failed lookup comes back as `bypassConfigError` with `bypassTeam: null`, so no
+ * half-resolved team (id: null) is left for `--write` to cache.
+ *
+ * @param {object|undefined} branchProtection
+ * @param {object|null} globalTeam
+ * @param {{householdOrg:string, repoOrg:string, lookup:(org:string, slug:string)=>Promise<number>}} ctx
+ * @returns {Promise<{bypassTeam:object|null, bypassConfigError:string|null}>}
+ */
+export async function resolveAuditBypassTeam(branchProtection, globalTeam, { householdOrg, repoOrg, lookup }) {
+  try {
+    const team = resolveRepoBypassTeam(branchProtection, globalTeam);
+    if (team?.scope === 'repo' && !team.cached) {
+      const id = await lookup(bypassTeamLookupOrg(team, { householdOrg, repoOrg }), team.slug);
+      return { bypassTeam: { ...team, id }, bypassConfigError: null };
+    }
+    return { bypassTeam: team, bypassConfigError: null };
+  } catch (e) {
+    return { bypassTeam: null, bypassConfigError: e.message };
+  }
+}
+
+/**
+ * Per-repo bypass-team notes printed after the audit table. Suggests `--write`
+ * only for a repo team that resolved but is not cached; a failed lookup gets a
+ * warning instead, since `--write` would not persist anything for it.
+ *
+ * @param {{repo:{name:string}, bypassTeam:object|null, bypassConfigError:string|null}[]} results
+ * @param {{write:boolean}} opts
+ * @returns {string[]}
+ */
+export function repoBypassNotes(results, { write }) {
+  const notes = [];
+  for (const r of results) {
+    if (r.bypassConfigError) notes.push(`(warning: ${r.repo.name}: ${r.bypassConfigError})`);
+    else if (!write && r.bypassTeam?.scope === 'repo' && !r.bypassTeam.cached) {
+      notes.push(`(note: ${r.repo.name}'s bypass team id not cached — run with --write to persist)`);
+    }
+  }
+  return notes;
+}
+
+/**
+ * Fold a repo's observed protection back into its manifest `branchProtection` block
+ * (the `audit --write` re-baseline).
+ *
+ * Every field follows one rule: record what GitHub reports, but never strip a value the
+ * manifest already declares. The manifest is the statement of intent, so re-baselining
+ * between editing a policy and applying it must not silently revert the edit.
+ *
+ * @param {object} branchProtection - mutated in place.
+ * @param {object} observed
+ * @param {string|null} [observed.statusCheck]
+ * @param {boolean|null} [observed.bypassAllowed] - false when the repo has a ruleset
+ *   with no bypass actors while a bypass team is configured; null when unknown or moot.
+ * @returns {object} the same block, for chaining.
+ */
+export function applyInferredProtection(branchProtection, { statusCheck, bypassAllowed = null }) {
+  if (statusCheck) branchProtection.requiredStatusCheck = statusCheck;
+  else if (!('requiredStatusCheck' in branchProtection)) {
+    branchProtection.requiredStatusCheck = null;
+  }
+  // Opt-out flag: record only `false`, and never overwrite a declared value. A repo
+  // naming its own bypass team declares intent too: an opt-out there would contradict it.
+  if (bypassAllowed === false && !('allowBypass' in branchProtection) && !('bypassTeam' in branchProtection)) {
+    branchProtection.allowBypass = false;
+  }
+  return branchProtection;
 }
 
 /**
@@ -368,11 +531,22 @@ export function formatBypassActor(actor, teamSlugById) {
 
 /**
  * Render a list of bypass actors as a single comma-separated cell.
- * Returns "—" for an empty list (no bypass = strictest).
+ * Returns "—" for an empty list (no bypass = strictest). The cell is flagged
+ * when GitHub disagrees with the manifest: actors on a repo that opts out
+ * (`allowBypass: false`), or anything but exactly the repo's own bypass team
+ * (PR mode) on a repo that names one (`repoTeam`, matched by id, or by slug
+ * while the id is not cached).
  */
-export function formatBypassActors(actors, teamSlugById) {
-  if (!actors?.length) return '—';
-  return actors.map(a => formatBypassActor(a, teamSlugById)).join(', ');
+export function formatBypassActors(actors, teamSlugById, { allowBypass = true, repoTeam = null } = {}) {
+  const cell = actors?.length ? actors.map(a => formatBypassActor(a, teamSlugById)).join(', ') : '—';
+  if (repoTeam) {
+    const isRepoTeam = a => a.actor_type === 'Team' && a.bypass_mode === 'pull_request' && (
+      repoTeam.id != null ? a.actor_id === repoTeam.id : teamSlugById.get(a.actor_id) === repoTeam.slug);
+    const matches = actors?.length === 1 && isRepoTeam(actors[0]);
+    return matches ? cell : `${cell} ⚠ manifest: ${repoTeam.slug}`;
+  }
+  if (!actors?.length) return cell;
+  return allowBypass ? cell : `${cell} ⚠ manifest: none`;
 }
 
 /**
@@ -420,6 +594,21 @@ export function diffTeamAccess(declared, actual) {
     if (!(team in declared)) revokes.push({ team, level });
   }
   return { grants, changes, revokes };
+}
+
+/**
+ * Turn a team-access diff into the GitHub calls that reconcile it. A change
+ * (raise *or* lower) is a PUT at the declared level: GitHub's team-repo PUT
+ * sets the permission outright, so maintain → read really downgrades.
+ * @param {{grants:{team:string,level:string}[], changes:{team:string,from:string,to:string}[], revokes:{team:string,level:string}[]}} diff
+ * @returns {{kind:'grant'|'change'|'revoke', team:string, method:'PUT'|'DELETE', permission:string|null}[]}
+ */
+export function planTeamAccessOps(diff) {
+  return [
+    ...diff.grants.map(g => ({ kind: 'grant', team: g.team, method: 'PUT', permission: PERMISSION_API[g.level] })),
+    ...diff.changes.map(c => ({ kind: 'change', team: c.team, method: 'PUT', permission: PERMISSION_API[c.to] })),
+    ...diff.revokes.map(r => ({ kind: 'revoke', team: r.team, method: 'DELETE', permission: null })),
+  ];
 }
 
 export const TEAM_ACCESS_LEVELS = new Set(['read', 'triage', 'write', 'maintain', 'admin']);
@@ -665,6 +854,10 @@ async function cmdAudit({ write }) {
           .map(r => getRulesetDetail(ghOrg, ghRepo, r.id))
     );
     const summary = summarizeState(details, classic, repoMeta);
+    // Effective bypass team; a repo's own uncached team id is resolved here so
+    // the Bypass column can compare by id and --write can cache it.
+    const { bypassTeam, bypassConfigError } = await resolveAuditBypassTeam(
+      repo.branchProtection, bypass, { householdOrg: org, repoOrg: ghOrg, lookup: getTeamId });
     // Team access (per-repo-org). Degrade to an error marker so one repo's
     // failure doesn't reject the whole audit.
     let teamAccessActual = null, teamAccessError = null;
@@ -682,6 +875,8 @@ async function cmdAudit({ write }) {
       ...summary,
       teamAccessActual,
       teamAccessError,
+      bypassTeam,
+      bypassConfigError,
     };
   }));
 
@@ -700,7 +895,12 @@ async function cmdAudit({ write }) {
     const squash = tribool(r.squashOnly);
     const threads = tribool(r.threadResolution);
     const co = tribool(r.codeOwnerReview);
-    const bypassStr = formatBypassActors(r.bypassActors, teamSlugById);
+    const bypassStr = r.bypassConfigError
+      ? `${formatBypassActors(r.bypassActors, teamSlugById)} ⚠ bypass team unresolved (see warning)`
+      : formatBypassActors(r.bypassActors, teamSlugById, {
+          allowBypass: resolveAllowBypass(r.repo.branchProtection),
+          repoTeam: r.bypassTeam?.scope === 'repo' ? r.bypassTeam : null,
+        });
     const delOnMerge = tribool(r.deleteBranchOnMerge);
     // Show GitHub repo name in parentheses when it differs from the manifest name
     const displayName = r.ghRepo && r.ghRepo !== r.repo.name
@@ -734,13 +934,17 @@ async function cmdAudit({ write }) {
     if (bypass && !bypass.cached) {
       manifest.branchProtection.bypassTeam.id = bypass.id;
     }
-    // Persist per-repo branchProtection.requiredStatusCheck.
+    // Persist per-repo branchProtection.requiredStatusCheck and allowBypass. A
+    // bypass opt-out is only inferable when a bypass team is configured and the
+    // repo has an active ruleset to read actors from. A repo's own bypass team
+    // is never inferred from GitHub; only its missing id is cached.
     for (const r of results) {
       r.repo.branchProtection = r.repo.branchProtection || {};
-      if (r.statusCheck) r.repo.branchProtection.requiredStatusCheck = r.statusCheck;
-      else if (!('requiredStatusCheck' in r.repo.branchProtection)) {
-        r.repo.branchProtection.requiredStatusCheck = null;
-      }
+      cacheRepoBypassTeamId(r.repo.branchProtection, r.bypassTeam);
+      applyInferredProtection(r.repo.branchProtection, {
+        statusCheck: r.statusCheck,
+        bypassAllowed: bypass && r.activeCount > 0 ? r.bypassActors.length > 0 : null,
+      });
     }
     // Bootstrap teamAccess for every repo from its current GitHub grants.
     for (const r of results) {
@@ -754,6 +958,7 @@ async function cmdAudit({ write }) {
       console.error('(note: bypass team id not cached in household.json — run with --write to persist)');
     }
   }
+  for (const note of repoBypassNotes(results, { write })) console.error(note);
 }
 
 /**
@@ -802,12 +1007,18 @@ async function cmdApply(repoName, { dryRun, yes }) {
   }
   const { org: ghOrg, repo: ghRepo } = ghTarget;
 
-  // Resolve bypass team using the household org (bypass team is org-scoped)
-  const householdOrg = resolveOrg(manifest);
-  const bypass = await resolveBypassTeam(householdOrg, manifest);
+  // Pick the bypass team: the repo's own, else the global one, else none.
+  let bypass;
+  try { bypass = resolveRepoBypassTeam(repo.branchProtection, resolveBypassTeamFromManifest(manifest)); }
+  catch (e) { console.error(`apply: ${repo.name}: ${e.message}`); process.exit(2); }
   if (bypass && !bypass.cached) {
-    console.error('(note: bypass team id not cached in household.json — run `audit --write` to persist)');
+    // Teams are org-scoped: a repo's own team lives in the repo's org.
+    const lookupOrg = bypassTeamLookupOrg(bypass, { householdOrg: resolveOrg(manifest), repoOrg: ghOrg });
+    bypass.id = await getTeamId(lookupOrg, bypass.slug);
+    const where = bypass.scope === 'repo' ? `${repo.name}'s branchProtection.bypassTeam` : 'branchProtection.bypassTeam';
+    console.error(`(note: ${where} id not cached in household.json — run \`audit --write\` to persist)`);
   }
+  if (bypass) console.log(`${repo.name}: bypass team ${bypass.slug} (${bypass.scope === 'repo' ? 'per-repo' : 'global'})`);
   const requiredStatusCheck = repo.branchProtection?.requiredStatusCheck || null;
   const desired = buildRuleset({ bypassTeamId: bypass?.id ?? null, requiredStatusCheck });
 
@@ -929,17 +1140,13 @@ async function cmdAccessApply(repoName, { dryRun, yes }) {
   // `audit`; it is not a failure. A DELETE that *does* error is a real problem
   // — auth/API/network — and is reported below, not swallowed.)
   const failures = [];
-  for (const g of diff.grants) {
-    try { await putTeamRepoPermission(org, g.team, org, ghRepo, PERMISSION_API[g.level]); }
-    catch (e) { failures.push(`grant ${g.team}=${g.level}: ${e.message}`); }
-  }
-  for (const c of diff.changes) {
-    try { await putTeamRepoPermission(org, c.team, org, ghRepo, PERMISSION_API[c.to]); }
-    catch (e) { failures.push(`change ${c.team}→${c.to}: ${e.message}`); }
-  }
-  for (const r of diff.revokes) {
-    try { await deleteTeamRepoAccess(org, r.team, org, ghRepo); }
-    catch (e) { failures.push(`revoke ${r.team}: ${e.message}`); }
+  for (const op of planTeamAccessOps(diff)) {
+    try {
+      if (op.method === 'DELETE') await deleteTeamRepoAccess(org, op.team, org, ghRepo);
+      else await putTeamRepoPermission(org, op.team, org, ghRepo, op.permission);
+    } catch (e) {
+      failures.push(`${op.kind} ${op.team}${op.permission ? `=${op.permission}` : ''}: ${e.message}`);
+    }
   }
 
   if (failures.length) {
@@ -956,7 +1163,11 @@ function help() {
       Inspect every repo in household.json; print state table.
       Entries without a "url" are inline directories and are skipped.
       With --write, populate each repo's branchProtection.requiredStatusCheck
-      from currently-required checks (bootstrap).
+      from currently-required checks (bootstrap), plus allowBypass: false where
+      GitHub shows no bypass actors. Declared values survive.
+      Caches a per-repo bypassTeam id when only its slug is declared.
+      The Bypass column flags actors on a repo whose manifest opts out, and
+      anything but its own team on a repo that names one.
 
   ./scripts/repo-policy.mjs apply <repo> [--dry-run] [--yes]
       Apply the standard ruleset "${RULESET_NAME}" to one repo.
@@ -985,6 +1196,12 @@ Standard rules applied to every repo:
   - bypass (optional): team named in household.json branchProtection.bypassTeam
     (PR mode), e.g. {"bypassTeam": {"slug": "my-team"}}; when no bypass team
     is configured, the ruleset is applied with no bypass actors (strictest)
+  - allowBypass set per-repo from household.json[repo].branchProtection.allowBypass
+    (default true). false gives that repo's ruleset no bypass actors even when a
+    bypass team is configured — for repos where nobody may merge around review.
+  - bypassTeam set per-repo from household.json[repo].branchProtection.bypassTeam
+    (same {"slug", "id"} shape as the global block) replaces the global team on
+    that repo, still in PR mode. Combining it with allowBypass: false is an error.
   - required_status_checks rule added per-repo from
     household.json[repo].branchProtection.requiredStatusCheck (if set)
 

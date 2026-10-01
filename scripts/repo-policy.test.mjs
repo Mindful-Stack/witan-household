@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   resolveOrg,
   buildRuleset,
+  applyInferredProtection,
   diffRulesets,
   diffRepoMeta,
   summarizeState,
@@ -15,6 +16,13 @@ import {
   normalizeTeamPermission,
   PERMISSION_API,
   diffTeamAccess,
+  planTeamAccessOps,
+  resolveAllowBypass,
+  resolveRepoBypassTeam,
+  bypassTeamLookupOrg,
+  cacheRepoBypassTeamId,
+  resolveAuditBypassTeam,
+  repoBypassNotes,
   validateTeamAccessShape,
   formatTeamAccessActual,
   formatTeamAccessDrift,
@@ -105,6 +113,17 @@ describe('buildRuleset', () => {
     }
   });
 
+  it('emits empty bypass_actors when the repo opts out with allowBypass: false', () => {
+    const r = buildRuleset({ bypassTeamId: 9395036, allowBypass: false });
+    assert.deepEqual(r.bypass_actors, [], 'opted-out repo → nobody bypasses, even with a team configured');
+  });
+
+  it('keeps the team bypass when allowBypass is true or absent (existing repos unchanged)', () => {
+    const want = [{ actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.deepEqual(buildRuleset({ bypassTeamId: 9395036, allowBypass: true }).bypass_actors, want);
+    assert.deepEqual(buildRuleset({ bypassTeamId: 9395036 }).bypass_actors, want);
+  });
+
   it('appends required_status_checks when requiredStatusCheck is provided', () => {
     const r = buildRuleset({ bypassTeamId: 1, requiredStatusCheck: 'Build & Test' });
     const sc = r.rules.find(x => x.type === 'required_status_checks');
@@ -129,12 +148,67 @@ describe('buildRuleset', () => {
   });
 });
 
+// === applyInferredProtection ===
+
+describe('applyInferredProtection', () => {
+  it('records an observed status check', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: 'Build & Test' });
+    assert.deepEqual(bp, { requiredStatusCheck: 'Build & Test' });
+  });
+
+  it('fills a missing requiredStatusCheck with null', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null });
+    assert.deepEqual(bp, { requiredStatusCheck: null });
+  });
+
+  it('records allowBypass: false when GitHub shows a ruleset nobody can bypass', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: false });
+    assert.equal(bp.allowBypass, false);
+  });
+
+  it('leaves allowBypass absent when bypass is allowed (true is the default)', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: true });
+    assert.ok(!('allowBypass' in bp), 'no true written to repos on the default');
+  });
+
+  it('leaves allowBypass absent when the observation is unknown (null)', () => {
+    const bp = {};
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: null });
+    assert.ok(!('allowBypass' in bp));
+  });
+
+  it('never strips a declared value that GitHub has not caught up to yet', () => {
+    const bp = { requiredStatusCheck: 'Build & Test', allowBypass: false };
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: true });
+    assert.deepEqual(bp, { requiredStatusCheck: 'Build & Test', allowBypass: false });
+  });
+
+  it('never records allowBypass: false on a repo that names its own bypass team', () => {
+    // The repo's team may simply not be applied yet; writing the opt-out would
+    // turn the declared team into a contradictory config.
+    const bp = { requiredStatusCheck: null, bypassTeam: { slug: 'release-team', id: 7 } };
+    applyInferredProtection(bp, { statusCheck: null, bypassAllowed: false });
+    assert.ok(!('allowBypass' in bp), 'per-repo team survives; no opt-out written');
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team', id: 7 });
+  });
+});
+
 // === diffRulesets ===
 
 describe('diffRulesets', () => {
   function desired() {
     return buildRuleset({ bypassTeamId: 9395036, requiredStatusCheck: 'Build & Test' });
   }
+
+  it('flags removal of the team bypass when a repo opts out', () => {
+    const existing = buildRuleset({ bypassTeamId: 1 });
+    const d = buildRuleset({ bypassTeamId: 1, allowBypass: false });
+    assert.deepEqual(diffRulesets(existing, d), ['bypass_actors: [["Team",1,"pull_request"]] → []']);
+  });
 
   it('returns "no existing ruleset" when existing is null', () => {
     const diffs = diffRulesets(null, desired());
@@ -468,6 +542,252 @@ describe('formatBypassActors', () => {
     );
     assert.equal(out, 'my-team, admin (always)');
   });
+
+  it('flags actors on a repo whose manifest opts out of bypass', () => {
+    const actors = [{ actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.equal(formatBypassActors(actors, teams, { allowBypass: false }), 'my-team ⚠ manifest: none');
+  });
+
+  it('renders an opted-out repo with no actors as plain "—"', () => {
+    assert.equal(formatBypassActors([], teams, { allowBypass: false }), '—');
+  });
+
+  it('does not flag actors when bypass is allowed', () => {
+    const actors = [{ actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.equal(formatBypassActors(actors, teams, { allowBypass: true }), 'my-team');
+  });
+});
+
+describe('formatBypassActors with a per-repo bypass team', () => {
+  const teams = new Map([[9395036, 'my-team'], [7, 'release-team']]);
+  const repoTeam = { slug: 'release-team', id: 7 };
+
+  it('shows the repo team unflagged when GitHub matches it', () => {
+    const actors = [{ actor_id: 7, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.equal(formatBypassActors(actors, teams, { repoTeam }), 'release-team');
+  });
+
+  it('flags a ruleset with no actors while the repo names a team', () => {
+    assert.equal(formatBypassActors([], teams, { repoTeam }), '— ⚠ manifest: release-team');
+  });
+
+  it('flags the global team still sitting where the repo names its own', () => {
+    const actors = [{ actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.equal(formatBypassActors(actors, teams, { repoTeam }), 'my-team ⚠ manifest: release-team');
+  });
+
+  it('flags extra actors and a non-PR bypass mode', () => {
+    const extra = [
+      { actor_id: 7, actor_type: 'Team', bypass_mode: 'pull_request' },
+      { actor_id: 9395036, actor_type: 'Team', bypass_mode: 'pull_request' },
+    ];
+    assert.match(formatBypassActors(extra, teams, { repoTeam }), /⚠ manifest: release-team$/);
+    const always = [{ actor_id: 7, actor_type: 'Team', bypass_mode: 'always' }];
+    assert.equal(formatBypassActors(always, teams, { repoTeam }), 'release-team (always) ⚠ manifest: release-team');
+  });
+
+  it('compares by slug when the repo team id is not cached yet', () => {
+    const actors = [{ actor_id: 7, actor_type: 'Team', bypass_mode: 'pull_request' }];
+    assert.equal(formatBypassActors(actors, teams, { repoTeam: { slug: 'release-team', id: null } }), 'release-team');
+  });
+});
+
+// === resolveAllowBypass ===
+
+describe('resolveAllowBypass', () => {
+  it('defaults to true when the block or field is absent', () => {
+    assert.equal(resolveAllowBypass(undefined), true);
+    assert.equal(resolveAllowBypass({}), true);
+    assert.equal(resolveAllowBypass({ requiredStatusCheck: null }), true);
+  });
+
+  it('returns the declared boolean', () => {
+    assert.equal(resolveAllowBypass({ allowBypass: false }), false);
+    assert.equal(resolveAllowBypass({ allowBypass: true }), true);
+  });
+
+  it('rejects a non-boolean rather than silently granting bypass', () => {
+    for (const v of ['false', 0, null, 'no']) {
+      assert.throws(() => resolveAllowBypass({ allowBypass: v }), /allowBypass must be a boolean/);
+    }
+  });
+});
+
+// === resolveRepoBypassTeam ===
+
+describe('resolveRepoBypassTeam', () => {
+  const global = { id: 42, slug: 'my-team', cached: true };
+
+  it('falls back to the global team when the repo names none', () => {
+    assert.deepEqual(resolveRepoBypassTeam(undefined, global), { ...global, scope: 'global' });
+    assert.deepEqual(resolveRepoBypassTeam({ requiredStatusCheck: null }, global), { ...global, scope: 'global' });
+  });
+
+  it('returns null when no team is configured anywhere', () => {
+    assert.equal(resolveRepoBypassTeam({}, null), null);
+  });
+
+  it('returns null when the repo opts out with allowBypass: false', () => {
+    assert.equal(resolveRepoBypassTeam({ allowBypass: false }, global), null);
+  });
+
+  it('uses the repo team instead of the global one', () => {
+    const r = resolveRepoBypassTeam({ bypassTeam: { slug: 'release-team', id: 7 } }, global);
+    assert.deepEqual(r, { id: 7, slug: 'release-team', cached: true, scope: 'repo' });
+  });
+
+  it('uses the repo team even when no global team is configured', () => {
+    const r = resolveRepoBypassTeam({ bypassTeam: { slug: 'release-team', id: 7 } }, null);
+    assert.deepEqual(r, { id: 7, slug: 'release-team', cached: true, scope: 'repo' });
+  });
+
+  it('reports an uncached repo team id so the caller can resolve it', () => {
+    const r = resolveRepoBypassTeam({ bypassTeam: { slug: 'release-team' } }, global);
+    assert.deepEqual(r, { id: null, slug: 'release-team', cached: false, scope: 'repo' });
+  });
+
+  it('accepts an explicit allowBypass: true next to a repo team', () => {
+    const r = resolveRepoBypassTeam({ allowBypass: true, bypassTeam: { slug: 'release-team', id: 7 } }, global);
+    assert.equal(r.scope, 'repo');
+  });
+
+  it('rejects a repo team combined with allowBypass: false', () => {
+    assert.throws(
+      () => resolveRepoBypassTeam({ allowBypass: false, bypassTeam: { slug: 'release-team', id: 7 } }, global),
+      /contradictory/,
+    );
+  });
+
+  it('still rejects a non-boolean allowBypass', () => {
+    assert.throws(() => resolveRepoBypassTeam({ allowBypass: 'false' }, global), /allowBypass must be a boolean/);
+  });
+
+  it('rejects a malformed repo team rather than silently using the global one', () => {
+    const bad = [
+      null, 'release-team', [], {}, { slug: '' }, { slug: 7 }, { id: 7 },
+      { slug: 'release-team', id: '7' }, { slug: 'release-team', id: 0 }, { slug: 'release-team', id: 1.5 },
+      { slug: 'release-team', id: null }, { slug: 'release-team', id: 7, mode: 'always' },
+    ];
+    for (const v of bad) {
+      assert.throws(
+        () => resolveRepoBypassTeam({ bypassTeam: v }, global),
+        /branchProtection\.bypassTeam/,
+        `should reject ${JSON.stringify(v)}`,
+      );
+    }
+  });
+});
+
+// === bypassTeamLookupOrg ===
+
+describe('bypassTeamLookupOrg', () => {
+  it('looks a per-repo team up in the repo\'s own org', () => {
+    assert.equal(bypassTeamLookupOrg({ scope: 'repo' }, { householdOrg: 'home-org', repoOrg: 'other-org' }), 'other-org');
+  });
+
+  it('keeps looking the global team up in the household org', () => {
+    assert.equal(bypassTeamLookupOrg({ scope: 'global' }, { householdOrg: 'home-org', repoOrg: 'other-org' }), 'home-org');
+  });
+});
+
+// === cacheRepoBypassTeamId ===
+
+describe('cacheRepoBypassTeamId', () => {
+  it('caches the id of a slug-only per-repo team after a successful lookup', () => {
+    const bp = { requiredStatusCheck: null, bypassTeam: { slug: 'release-team' } };
+    assert.equal(cacheRepoBypassTeamId(bp, { slug: 'release-team', id: 7, cached: false, scope: 'repo' }), true);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team', id: 7 });
+  });
+
+  it('leaves the declaration untouched when the lookup failed (id still null)', () => {
+    const bp = { requiredStatusCheck: null, bypassTeam: { slug: 'release-team' } };
+    assert.equal(cacheRepoBypassTeamId(bp, { slug: 'release-team', id: null, cached: false, scope: 'repo' }), false);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team' }, 'no id: null written');
+    assert.equal(cacheRepoBypassTeamId(bp, null), false);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team' });
+  });
+
+  it('never overwrites a declared id or touches the global team', () => {
+    const bp = { bypassTeam: { slug: 'release-team', id: 7 } };
+    assert.equal(cacheRepoBypassTeamId(bp, { slug: 'release-team', id: 99, cached: true, scope: 'repo' }), false);
+    assert.equal(bp.bypassTeam.id, 7);
+    const plain = { requiredStatusCheck: null };
+    assert.equal(cacheRepoBypassTeamId(plain, { slug: 'my-team', id: 42, cached: false, scope: 'global' }), false);
+    assert.ok(!('bypassTeam' in plain));
+  });
+});
+
+// === resolveAuditBypassTeam ===
+
+describe('resolveAuditBypassTeam', () => {
+  const orgs = { householdOrg: 'home-org', repoOrg: 'other-org' };
+  const slugOnly = { requiredStatusCheck: null, bypassTeam: { slug: 'release-team' } };
+
+  it('resolves a slug-only repo team in the repo\'s org', async () => {
+    const calls = [];
+    const lookup = async (org, slug) => { calls.push([org, slug]); return 7; };
+    const r = await resolveAuditBypassTeam(slugOnly, null, { ...orgs, lookup });
+    assert.deepEqual(calls, [['other-org', 'release-team']]);
+    assert.deepEqual(r, { bypassTeam: { id: 7, slug: 'release-team', cached: false, scope: 'repo' }, bypassConfigError: null });
+  });
+
+  it('drops the half-resolved team when the lookup throws, so nothing caches id: null', async () => {
+    const lookup = async () => { throw new Error('HTTP 404: Not Found'); };
+    const r = await resolveAuditBypassTeam(slugOnly, null, { ...orgs, lookup });
+    assert.equal(r.bypassTeam, null, 'no team left behind for --write');
+    assert.match(r.bypassConfigError, /404/);
+    const bp = structuredClone(slugOnly);
+    assert.equal(cacheRepoBypassTeamId(bp, r.bypassTeam), false);
+    assert.deepEqual(bp.bypassTeam, { slug: 'release-team' }, 'declaration left as is');
+  });
+
+  it('reports an invalid declaration without looking anything up', async () => {
+    let called = false;
+    const lookup = async () => { called = true; return 7; };
+    const r = await resolveAuditBypassTeam({ allowBypass: false, bypassTeam: { slug: 'release-team' } }, null, { ...orgs, lookup });
+    assert.equal(called, false);
+    assert.equal(r.bypassTeam, null);
+    assert.match(r.bypassConfigError, /contradictory/);
+  });
+
+  it('does not look up a cached repo team or the global team', async () => {
+    const lookup = async () => { throw new Error('should not be called'); };
+    const cached = await resolveAuditBypassTeam({ bypassTeam: { slug: 'release-team', id: 7 } }, null, { ...orgs, lookup });
+    assert.equal(cached.bypassTeam.id, 7);
+    const global = await resolveAuditBypassTeam({}, { id: null, slug: 'my-team', cached: false }, { ...orgs, lookup });
+    assert.equal(global.bypassTeam.scope, 'global');
+  });
+});
+
+// === repoBypassNotes ===
+
+describe('repoBypassNotes', () => {
+  const repo = name => ({ name });
+
+  it('suggests --write only for a repo team that resolved but is not cached', () => {
+    const notes = repoBypassNotes([
+      { repo: repo('a'), bypassTeam: { id: 7, slug: 't', cached: false, scope: 'repo' }, bypassConfigError: null },
+      { repo: repo('b'), bypassTeam: { id: 7, slug: 't', cached: true, scope: 'repo' }, bypassConfigError: null },
+      { repo: repo('c'), bypassTeam: { id: null, slug: 'g', cached: false, scope: 'global' }, bypassConfigError: null },
+    ], { write: false });
+    assert.deepEqual(notes, ["(note: a's bypass team id not cached — run with --write to persist)"]);
+  });
+
+  it('warns instead of suggesting --write when the lookup failed', () => {
+    const notes = repoBypassNotes([
+      { repo: repo('a'), bypassTeam: null, bypassConfigError: 'HTTP 404: Not Found' },
+    ], { write: false });
+    assert.deepEqual(notes, ['(warning: a: HTTP 404: Not Found)']);
+    assert.ok(!notes.some(n => n.includes('--write')));
+  });
+
+  it('only warns in --write mode (the id was cached or left alone)', () => {
+    const notes = repoBypassNotes([
+      { repo: repo('a'), bypassTeam: { id: 7, slug: 't', cached: false, scope: 'repo' }, bypassConfigError: null },
+      { repo: repo('b'), bypassTeam: null, bypassConfigError: 'boom' },
+    ], { write: true });
+    assert.deepEqual(notes, ['(warning: b: boom)']);
+  });
 });
 
 // === formatRepos ===
@@ -625,6 +945,11 @@ describe('diffTeamAccess', () => {
       grants: [], changes: [{ team: 'sec', from: 'read', to: 'maintain' }], revokes: [],
     });
   });
+  it('reports a downgrade as a change, not a no-op', () => {
+    assert.deepEqual(diffTeamAccess({ ops: 'read' }, { ops: 'maintain' }), {
+      grants: [], changes: [{ team: 'ops', from: 'maintain', to: 'read' }], revokes: [],
+    });
+  });
   it('reports a revoke (with its actual level) for an undeclared team', () => {
     assert.deepEqual(diffTeamAccess({}, { qa: 'read' }), {
       grants: [], changes: [], revokes: [{ team: 'qa', level: 'read' }],
@@ -643,6 +968,28 @@ describe('diffTeamAccess', () => {
   });
   it('empty declared + empty actual = no changes', () => {
     assert.deepEqual(diffTeamAccess({}, {}), { grants: [], changes: [], revokes: [] });
+  });
+});
+
+// === planTeamAccessOps ===
+
+describe('planTeamAccessOps', () => {
+  it('turns a downgrade into a PUT at the lower API permission', () => {
+    const ops = planTeamAccessOps(diffTeamAccess({ ops: 'read' }, { ops: 'maintain' }));
+    assert.deepEqual(ops, [{ kind: 'change', team: 'ops', method: 'PUT', permission: 'pull' }]);
+  });
+
+  it('emits grants, changes, then revokes with API permission values', () => {
+    const ops = planTeamAccessOps(diffTeamAccess({ a: 'write', b: 'admin' }, { b: 'read', c: 'triage' }));
+    assert.deepEqual(ops, [
+      { kind: 'grant', team: 'a', method: 'PUT', permission: 'push' },
+      { kind: 'change', team: 'b', method: 'PUT', permission: 'admin' },
+      { kind: 'revoke', team: 'c', method: 'DELETE', permission: null },
+    ]);
+  });
+
+  it('is empty when nothing differs', () => {
+    assert.deepEqual(planTeamAccessOps(diffTeamAccess({ a: 'read' }, { a: 'read' })), []);
   });
 });
 

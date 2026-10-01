@@ -81,6 +81,40 @@ hook tells the agent to prompt users with `make update-kb` when KBs are stale.
 Uses ff-only safety: only pulls on a clean `main`; fetches all KBs regardless
 of per-KB failures.
 
+## `repo-policy.mjs apply` — branch protection
+
+Every repo gets the same standard ruleset; a repo entry's `branchProtection`
+block holds the per-repo knobs:
+
+```json
+"branchProtection": {
+  "requiredStatusCheck": "Build & Test",
+  "allowBypass": false
+}
+```
+
+| Field | Default | Effect |
+|---|---|---|
+| `requiredStatusCheck` | — (required: string or `null`) | adds a required status check with this context |
+| `allowBypass` | `true` (omit) | `false` gives the ruleset no bypass actors, even when the top-level `branchProtection.bypassTeam` is set; set only `false` |
+| `bypassTeam` | top-level `branchProtection.bypassTeam` (omit) | `{"slug": "team", "id": 123}` replaces the global bypass team on this repo; `id` is optional and cached by `make policy-audit-write`. Bypass stays PR-mode. An error next to `allowBypass: false` |
+
+Use `allowBypass: false` for repos where nobody should merge around review,
+such as one whose merge deploys to production. Use a per-repo `bypassTeam`
+when such a repo still needs a narrower break-glass group than the global
+team: only that team can bypass, and only when merging a PR, where the bypass
+is visible.
+
+`make policy-audit` flags a repo whose Bypass column still lists actors while
+its manifest says `allowBypass: false`, and a repo with its own `bypassTeam`
+whose actors are anything but that team. `make policy-audit-write` records what
+GitHub reports (including `allowBypass: false` for a ruleset with no actors
+while a bypass team is configured) but never strips a value already declared.
+It never infers a per-repo `bypassTeam` from GitHub and never writes
+`allowBypass: false` next to one.
+Preview a change with `./scripts/repo-policy.mjs apply <repo> --dry-run`, then
+apply it with `make policy-apply REPO=<repo>`.
+
 ## `repo-policy.mjs access-apply` — team access
 
 Declare `teamAccess` on a repo entry in `household.json`:
@@ -91,7 +125,8 @@ Declare `teamAccess` on a repo entry in `household.json`:
 
 Levels: `read · triage · write · maintain · admin`. `make policy-audit` shows a
 team-access drift table for every repo; `make access-apply REPO=portal` makes
-GitHub match the block **authoritatively** — undeclared teams are revoked. Use
+GitHub match the block **authoritatively** — undeclared teams are revoked and
+lowered levels are downgraded (e.g. `maintain` → `read`), not just raised. Use
 `DRY_RUN=1` to preview. Team ops use each repo's own org (correct for mixed-org
 households). Absent `teamAccess` key = unmanaged (skipped); `{}` = no teams.
 Requires `gh` with `read:org`. Manages direct grants only (inherited parent-team
